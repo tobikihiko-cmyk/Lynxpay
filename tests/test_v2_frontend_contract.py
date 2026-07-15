@@ -43,7 +43,11 @@ def test_merchant_app_has_required_daraja_modules():
 def test_bff_keeps_refresh_tokens_out_of_browser_storage_and_rotates_server_side():
     bff = _read("src/lib/bff.ts")
     proxy = _read("src/app/api/lynxpay/[...path]/route.ts")
-    all_source = "\n".join(path.read_text() for path in ROOT.rglob("*.ts*"))
+    all_source = "\n".join(
+        path.read_text()
+        for path in ROOT.rglob("*.ts*")
+        if "node_modules" not in path.parts and ".next" not in path.parts
+    )
     assert 'httpOnly: true' in bff
     assert 'sameSite: "lax"' in bff
     assert 'secure' in bff

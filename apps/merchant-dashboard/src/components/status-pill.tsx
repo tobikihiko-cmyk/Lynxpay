@@ -1,10 +1,19 @@
 const tones: Record<string, string> = {
-  success: "bg-emerald-100 text-emerald-800", active: "bg-emerald-100 text-emerald-800",
-  failed: "bg-red-100 text-red-800", rejected: "bg-red-100 text-red-800",
-  unknown: "bg-amber-100 text-amber-900", timeout: "bg-amber-100 text-amber-900", needs_review: "bg-amber-100 text-amber-900",
-  stk_sent: "bg-blue-100 text-blue-800", pending: "bg-blue-100 text-blue-800", pending_approval: "bg-blue-100 text-blue-800"
+  success: "border-emerald-200 bg-emerald-50 text-emerald-800 before:bg-emerald-500",
+  active: "border-emerald-200 bg-emerald-50 text-emerald-800 before:bg-emerald-500",
+  failed: "border-red-200 bg-red-50 text-red-800 before:bg-red-500",
+  rejected: "border-red-200 bg-red-50 text-red-800 before:bg-red-500",
+  suspended: "border-red-200 bg-red-50 text-red-800 before:bg-red-500",
+  unknown: "border-amber-200 bg-amber-50 text-amber-900 before:bg-amber-500",
+  timeout: "border-amber-200 bg-amber-50 text-amber-900 before:bg-amber-500",
+  needs_review: "border-amber-200 bg-amber-50 text-amber-900 before:bg-amber-500",
+  stk_sent: "border-blue-200 bg-blue-50 text-blue-800 before:bg-blue-500",
+  pending: "border-blue-200 bg-blue-50 text-blue-800 before:bg-blue-500",
+  pending_approval: "border-violet-200 bg-violet-50 text-violet-800 before:bg-violet-500",
+  created: "border-slate-200 bg-slate-50 text-slate-700 before:bg-slate-400",
+  inactive: "border-slate-200 bg-slate-50 text-slate-600 before:bg-slate-400"
 };
 
 export function StatusPill({ status }: { status: string }) {
-  return <span className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-wider ${tones[status] || "bg-slate-100 text-slate-700"}`}>{status.replaceAll("_", " ")}</span>;
+  return <span className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2 py-1 text-[9px] font-black uppercase tracking-[.09em] before:size-1.5 before:rounded-full ${tones[status] || "border-slate-200 bg-slate-50 text-slate-700 before:bg-slate-400"}`}>{status.replaceAll("_", " ")}</span>;
 }

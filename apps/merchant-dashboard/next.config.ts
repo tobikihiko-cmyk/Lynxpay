@@ -9,9 +9,14 @@ const securityHeaders = [
   { key: "Cross-Origin-Resource-Policy", value: "same-origin" }
 ];
 
+if (process.env.NODE_ENV === "production") {
+  securityHeaders.push({ key: "Strict-Transport-Security", value: "max-age=31536000; includeSubDomains" });
+}
+
 const nextConfig: NextConfig = {
   output: "standalone",
   poweredByHeader: false,
+  turbopack: { root: process.cwd() },
   async headers() {
     return [{ source: "/(.*)", headers: securityHeaders }];
   }

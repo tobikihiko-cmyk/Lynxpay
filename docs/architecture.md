@@ -86,9 +86,11 @@ Workers claim rows with `FOR UPDATE SKIP LOCKED`, assign a lease owner and expir
 
 ### Merchant dashboard
 
-The separate static dashboard is a Daraja-specific M-PESA operations console, not a generic payment-provider shell. Its information hierarchy starts with payment state, captured M-PESA volume, STK requests awaiting evidence, callback handling, receipts, shortcode, and sandbox/live context. It provides owner registration, sign-in, merchant setup, PayBill/Till/store-number configuration, credential testing and activation, test STK initiation, payment/callback inspection, authentication recovery, MFA input, invitation acceptance, and session-aware token refresh. It uses the same-origin `/api` reverse proxy and shows an explicit warning for production merchants. Nginx supplies CSP, framing denial, `nosniff`, restrictive permissions, COOP/CORP, and SPA fallback headers.
+The merchant application in `apps/merchant-dashboard/` is an independently built and deployed Next.js service. It is Daraja-specific rather than a generic provider shell: the information hierarchy starts with payment state, captured M-PESA volume, requests awaiting evidence, callbacks, receipts, reconciliation, shortcode, and sandbox/live context.
 
-The current dashboard stores bearer tokens in `sessionStorage`. CSP and short access-token lifetime reduce exposure, but a production dashboard should move to a same-origin BFF or secure `HttpOnly`, `Secure`, `SameSite` cookie design before the browser becomes a high-value administrative surface.
+The browser calls only the dashboard's same-origin `/api/lynxpay/*` routes. This backend-for-frontend forwards requests to FastAPI over the private service network, rotates refresh tokens server-side, and stores access and refresh tokens in `HttpOnly`, `Secure` in production, `SameSite=Lax` cookies. Browser JavaScript never receives or persists bearer tokens. Mutations reject cross-origin requests, auth token endpoints cannot be reached through the generic proxy, and proxied responses are marked `no-store`.
+
+The Next.js and FastAPI runtimes have separate dependency manifests, containers, environment variables, and build pipelines. `LYNXPAY_API_URL` is a private server-only variable and must never use a `NEXT_PUBLIC_` prefix. Docker Compose deploys the Next.js service on the dashboard port and keeps FastAPI as the only authority for identity, tenancy, credentials, payment state, and audit events. The older dependency-free `dashboard/` console remains only as temporary migration coverage and is not part of the deployed runtime.
 
 ## Data model
 

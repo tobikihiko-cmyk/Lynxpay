@@ -21,9 +21,18 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path: st
   let rotated: Record<string, unknown> | null = null;
   if (upstream.status === 401 && tokens.refresh) {
     const refresh = await backend("/api/v1/auth/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refresh_token: tokens.refresh }) });
-    if (refresh.ok) { rotated = await refresh.json(); tokens = { access: String(rotated.access_token), refresh: String(rotated.refresh_token) }; upstream = await send(tokens.access); }
+    if (refresh.ok) {
+      const payload = await refresh.json() as Record<string, unknown>;
+      rotated = payload;
+      tokens = { access: String(payload.access_token), refresh: String(payload.refresh_token) };
+      upstream = await send(tokens.access);
+    }
   }
-  const response = new NextResponse(upstream.body, { status: upstream.status, headers: { "Content-Type": upstream.headers.get("content-type") || "application/json" } });
+  const response = new NextResponse(upstream.body, { status: upstream.status, headers: {
+    "Content-Type": upstream.headers.get("content-type") || "application/json",
+    "Cache-Control": "no-store",
+    ...(upstream.headers.get("x-request-id") ? { "X-Request-ID": upstream.headers.get("x-request-id")! } : {})
+  } });
   if (rotated) setSession(response, rotated); else if (upstream.status === 401) clearSession(response);
   return response;
 }

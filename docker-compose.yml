@@ -62,12 +62,14 @@ services:
         condition: service_completed_successfully
 
   dashboard:
-    image: nginx:1.27-alpine
+    build:
+      context: ./apps/merchant-dashboard
+      dockerfile: Dockerfile
+    environment:
+      LYNXPAY_API_URL: http://api:8000
+      NODE_ENV: production
     ports:
-      - "${LYNXPAY_DASHBOARD_PORT:-3000}:80"
-    volumes:
-      - ./dashboard:/usr/share/nginx/html:ro
-      - ./dashboard/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - "${LYNXPAY_DASHBOARD_PORT:-3000}:3000"
     depends_on:
       api:
         condition: service_started

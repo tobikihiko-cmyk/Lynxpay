@@ -10,7 +10,7 @@ describe("PaymentTable", () => {
       success_source: "status_query", receipt_status: "missing", created_at: "2026-07-16T08:00:00Z"
     }]} />);
     expect(screen.getByText("ORDER-100")).toBeInTheDocument();
-    expect(screen.getByText(/status_query · missing/)).toBeInTheDocument();
+    expect(screen.getByText(/status query · missing/)).toBeInTheDocument();
     expect(screen.getByText("needs review")).toBeInTheDocument();
   });
 });

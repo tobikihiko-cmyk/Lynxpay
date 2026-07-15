@@ -8,7 +8,9 @@ __pycache__/
 htmlcov/
 dist/
 build/
+node_modules/
+.next/
+*.tsbuildinfo
 *.egg-info/
 *.db
 .DS_Store
-

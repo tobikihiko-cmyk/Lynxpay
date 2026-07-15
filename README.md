@@ -52,11 +52,16 @@ Run the delivery/reconciliation worker separately:
 python -m app.worker
 ```
 
-The standalone Daraja operations console is in `dashboard/` and can be served with:
+The merchant application is a separate Next.js runtime in `apps/merchant-dashboard/`. It uses a same-origin backend-for-frontend so access and refresh tokens remain in secure server-managed cookies:
 
 ```bash
-python3 -m http.server 3000 --directory dashboard
+cd apps/merchant-dashboard
+cp .env.example .env.local
+npm ci
+npm run dev
 ```
+
+The older dependency-free console in `dashboard/` is retained temporarily for internal migration coverage and is not deployed by Docker Compose.
 
 ## Verification
 
