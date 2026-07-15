@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; object-src 'none'">
+    <title>LynxPay · M-PESA Operations</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#content">Skip to payment operations</a>
+    <div class="shell">
+      <aside class="control-rail" aria-label="LynxPay workspace">
+        <div class="brand-lockup">
+          <span class="lynx-mark" aria-hidden="true">
+            <svg viewBox="0 0 48 48" role="img">
+              <path d="M9 8l8 7 7-4 7 4 8-7-3 14 3 9-15 10L9 31l3-9L9 8z"></path>
+              <path class="mark-detail" d="M17 25l4 2m10-2l-4 2m-7 7h8"></path>
+            </svg>
+          </span>
+          <span><strong>LynxPay</strong><small>Daraja infrastructure</small></span>
+        </div>
+
+        <nav id="nav" aria-label="Merchant console" hidden>
+          <p class="nav-label">Money movement</p>
+          <button type="button" data-view="payments" class="active">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16v11H4zM7 4h10v3M7 12h4m5 0h1"></path></svg>
+            M-PESA payments
+          </button>
+          <button type="button" data-view="callbacks">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8a7 7 0 0112-2l2 2m0-4v4h-4M19 16a7 7 0 01-12 2l-2-2m0 4v-4h4"></path></svg>
+            Daraja callbacks
+          </button>
+          <button type="button" data-view="stk">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8a2 2 0 012 2v14a2 2 0 01-2 2H8a2 2 0 01-2-2V5a2 2 0 012-2zm2 3h4m-3 12h2"></path></svg>
+            Send STK Push
+          </button>
+
+          <p class="nav-label">Configuration</p>
+          <button type="button" data-view="merchants">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9l2-5h12l2 5M5 9v11h14V9M9 20v-6h6v6M3 9h18"></path></svg>
+            M-PESA accounts
+          </button>
+          <button type="button" data-view="credentials">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 4v5c0 5-3.4 8-8 9-4.6-1-8-4-8-9V7l8-4zm-3 9l2 2 4-5"></path></svg>
+            Daraja credentials
+          </button>
+          <button type="button" data-view="onboarding">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM8 9l2 2 4-4m-6 9h8"></path></svg>
+            Activation checklist
+          </button>
+        </nav>
+
+        <div class="rail-footer">
+          <div class="network-card" id="network-card" hidden>
+            <span class="network-line"><i></i> Safaricom Daraja</span>
+            <strong id="network-environment">Environment pending</strong>
+            <small>Evidence-first processing</small>
+          </div>
+          <button type="button" id="logout" class="quiet" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H5v14h5m4-3l4-4-4-4m4 4H9"></path></svg>
+            Sign out
+          </button>
+        </div>
+      </aside>
+
+      <main id="main" tabindex="-1">
+        <header class="topbar">
+          <div class="page-identity">
+            <p class="eyebrow" id="eyebrow">M-PESA OPERATIONS</p>
+            <h1 id="title">Sign in</h1>
+          </div>
+          <div class="session-meta" id="session-meta" hidden>
+            <span class="secure-session"><i></i> Secure session</span>
+            <span class="user-orb" id="user-orb" aria-hidden="true">LP</span>
+            <span class="user-copy"><strong id="user-name">Merchant owner</strong><small id="user-role">Owner</small></span>
+          </div>
+        </header>
+        <div id="status" class="toast" role="status" aria-live="polite"></div>
+        <section id="content" aria-live="polite" aria-busy="false"></section>
+      </main>
+    </div>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

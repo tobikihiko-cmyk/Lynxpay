@@ -1,0 +1,1 @@
+"""LynxPay shared infrastructure."""

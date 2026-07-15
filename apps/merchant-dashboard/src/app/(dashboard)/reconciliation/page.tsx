@@ -1,0 +1,3 @@
+"use client";
+import { useEffect, useState } from "react"; import { api } from "@/lib/api"; import { Payment, PaymentTable } from "@/components/payment-table";
+export default function Reconciliation(){ const [items,setItems]=useState<Payment[]>([]); useEffect(()=>{api<{items:Payment[]}>("/reconciliation/issues?limit=100").then(x=>setItems(x.items));},[]); return <section><p className="eyeline">EVIDENCE CONTROL</p><h2 className="mt-2 text-4xl font-bold tracking-[-.05em]">Reconciliation queue</h2><p className="mt-2 mb-6 max-w-2xl text-sm leading-6 text-slate-500">Pending, uncertain, failed and receipt-deficient payments that require automated status checks or an operator decision.</p><PaymentTable payments={items}/></section>; }

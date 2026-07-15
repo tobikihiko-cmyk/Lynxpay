@@ -1,0 +1,44 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EncryptWithActiveLynxPayKeyOnly",
+      "Effect": "Allow",
+      "Action": "kms:Encrypt",
+      "Resource": "${ACTIVE_KEY_ARN}",
+      "Condition": {
+        "StringEquals": {
+          "kms:EncryptionContext:service": "lynxpay",
+          "kms:EncryptionContext:key_version": "${ACTIVE_KEY_VERSION}"
+        }
+      }
+    },
+    {
+      "Sid": "DecryptLynxPayDataKeysDuringRotationWindow",
+      "Effect": "Allow",
+      "Action": "kms:Decrypt",
+      "Resource": [
+        "${OLD_KEY_ARN}",
+        "${ACTIVE_KEY_ARN}"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "kms:EncryptionContext:service": "lynxpay",
+          "kms:EncryptionContext:key_version": [
+            "${OLD_KEY_VERSION}",
+            "${ACTIVE_KEY_VERSION}"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DescribeApprovedLynxPayKeys",
+      "Effect": "Allow",
+      "Action": "kms:DescribeKey",
+      "Resource": [
+        "${OLD_KEY_ARN}",
+        "${ACTIVE_KEY_ARN}"
+      ]
+    }
+  ]
+}

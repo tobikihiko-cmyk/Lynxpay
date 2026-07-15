@@ -1,0 +1,6 @@
+-r requirements.txt
+pytest==8.2.0
+pytest-asyncio==0.23.6
+ruff==0.4.4
+bandit[toml]>=1.7,<2
+pip-audit==2.10.1

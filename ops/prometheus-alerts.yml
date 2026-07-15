@@ -1,0 +1,52 @@
+groups:
+  - name: lynxpay-api
+    rules:
+      - alert: LynxPayHighServerErrorRate
+        expr: sum(rate(lynxpay_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(lynxpay_http_requests_total[5m])), 0.001) > 0.02
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: "LynxPay API 5xx rate exceeds 2%"
+          runbook: "docs/runbooks/incident-response.md#api-errors"
+      - alert: LynxPayP95LatencyHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(lynxpay_http_request_duration_seconds_bucket[5m]))) > 2
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "LynxPay API p95 latency exceeds two seconds"
+          runbook: "docs/runbooks/incident-response.md#latency"
+      - alert: LynxPayRateLimitingSpike
+        expr: sum(rate(lynxpay_rate_limited_total[5m])) > 5
+        for: 5m
+        labels: { severity: ticket }
+        annotations:
+          summary: "LynxPay is rejecting more than five requests per second"
+          runbook: "docs/runbooks/incident-response.md#rate-limiting"
+      - alert: LynxPayWebhookDeadLetters
+        expr: lynxpay_webhook_deliveries{status="dead_letter"} > 0
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "LynxPay has dead-lettered webhook deliveries"
+          runbook: "docs/runbooks/incident-response.md#payment-or-callback-anomaly"
+      - alert: LynxPayEmailDeadLetters
+        expr: lynxpay_email_deliveries{status="dead_letter"} > 0
+        for: 15m
+        labels: { severity: ticket }
+        annotations:
+          summary: "LynxPay has dead-lettered identity emails"
+          runbook: "docs/runbooks/incident-response.md#api-errors"
+      - alert: LynxPayUnknownPayments
+        expr: lynxpay_payments{status="unknown"} > 0
+        for: 15m
+        labels: { severity: page }
+        annotations:
+          summary: "LynxPay has payments requiring reconciliation"
+          runbook: "docs/runbooks/incident-response.md#payment-or-callback-anomaly"
+      - alert: LynxPayDatabaseMetricCollectionFailure
+        expr: increase(lynxpay_database_gauge_collection_errors_total[10m]) > 0
+        for: 5m
+        labels: { severity: ticket }
+        annotations:
+          summary: "LynxPay cannot collect database-backed operational metrics"
+          runbook: "docs/runbooks/incident-response.md#api-errors"
