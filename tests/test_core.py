@@ -114,6 +114,48 @@ def api_headers(api_key):
     return {"X-API-Key": api_key}
 
 
+def test_payment_list_filters_merchant_verification_purpose(db, client, auth_headers, merchant):
+    payments = [
+        Payment(
+            organization_id=merchant["organization_id"],
+            merchant_account_id=merchant["id"],
+            external_reference="FILTER-ORDINARY",
+            customer_phone="254712345678",
+            amount=Decimal("100.00"),
+            currency="KES",
+            description="Ordinary payment",
+            purpose="payment",
+            status="created",
+        ),
+        Payment(
+            organization_id=merchant["organization_id"],
+            merchant_account_id=merchant["id"],
+            external_reference="FILTER-VERIFY",
+            customer_phone="254712345678",
+            amount=Decimal("1.00"),
+            currency="KES",
+            description="Onboarding verification",
+            purpose="merchant_verification",
+            status="success",
+            checkout_request_id="filter-verification-checkout",
+            mpesa_receipt_number="FILTER-RECEIPT",
+            result_code="0",
+        ),
+    ]
+    db.add_all(payments)
+    db.commit()
+
+    response = client.get(
+        f"{BASE}/payments",
+        headers=auth_headers,
+        params={"merchant_id": merchant["id"], "purpose": "merchant_verification"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert [item["external_reference"] for item in response.json()["items"]] == ["FILTER-VERIFY"]
+    assert response.json()["items"][0]["purpose"] == "merchant_verification"
+
+
 @pytest.fixture
 def stk_payment(client, api_headers, merchant):
     with patch(

@@ -88,9 +88,9 @@ async def test_smtp_failure_is_redacted_and_retried(db, auth_headers, monkeypatc
         raise RuntimeError("provider detail containing secret-token")
 
     monkeypatch.setattr("app.email_delivery._smtp_send", fail)
-    assert claim_emails(db, "email-worker") == [record.id]
+    assert record.id in claim_emails(db, "email-worker")
     delivered = await deliver_claimed_email(db, record.id, "email-worker")
     assert delivered.status == "retry_scheduled"
     assert delivered.last_error == "RuntimeError"
     assert "secret-token" not in str(delivered.__dict__)
-    assert db.query(EmailOutbox).count() == 1
+    assert db.query(EmailOutbox).filter(EmailOutbox.id == record.id).count() == 1

@@ -40,6 +40,26 @@ def test_merchant_app_has_required_daraja_modules():
         assert term in combined
 
 
+def test_onboarding_wizard_uses_real_six_stage_lifecycle_and_callback_proof():
+    page = _read("src/app/(dashboard)/onboarding/page.tsx")
+    steps = _read("src/components/onboarding-steps.tsx")
+    state = _read("src/lib/onboarding.ts")
+    proxy = _read("src/app/api/lynxpay/[...path]/route.ts")
+    for contract in (
+        '"/organization"',
+        '"/merchants"',
+        "daraja-credentials/test",
+        'purpose: "merchant_verification"',
+        '"/organization/consents"',
+        "submit-for-approval",
+        '"/api-keys"',
+    ):
+        assert contract in steps
+    assert "purpose=merchant_verification" in page
+    assert 'verificationPayment?.status === "success"' in state
+    assert '"Idempotency-Key"' in proxy
+
+
 def test_bff_keeps_refresh_tokens_out_of_browser_storage_and_rotates_server_side():
     bff = _read("src/lib/bff.ts")
     proxy = _read("src/app/api/lynxpay/[...path]/route.ts")
@@ -48,9 +68,9 @@ def test_bff_keeps_refresh_tokens_out_of_browser_storage_and_rotates_server_side
         for path in ROOT.rglob("*.ts*")
         if "node_modules" not in path.parts and ".next" not in path.parts
     )
-    assert 'httpOnly: true' in bff
+    assert "httpOnly: true" in bff
     assert 'sameSite: "lax"' in bff
-    assert 'secure' in bff
+    assert "secure" in bff
     assert 'cookies.set("lp_refresh"' in bff
     assert "/api/v1/auth/refresh" in proxy
     assert "Use the secure session endpoint" in proxy

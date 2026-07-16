@@ -9,7 +9,7 @@ The Phase 1 dashboard implements a resumable six-step onboarding flow. LynxPay r
 3. **M-PESA setup** — records PayBill, Till, or store number, shortcode, environment, and the canonical callback URL. Till/store-number setups require the Till number.
 4. **Daraja credentials** — encrypts the merchant's consumer key, consumer secret, and passkey, then verifies OAuth. Saving secrets moves the merchant to `credentials_added`; a successful test moves it to `verified`.
 5. **Test payment** — a human owner/admin sends exactly KES 1 with payment purpose `merchant_verification`. The wizard remains on this step for `created`, `pending`, `stk_sent`, or `unknown`; it advances only after a valid callback makes the payment `success`.
-6. **Activation** — the API verifies that a successful merchant-verification payment was created after the latest credential test, activates the merchant, and issues one environment-specific, merchant-bound API key. The full key is displayed once and only its digest is stored.
+6. **Activation** — the API verifies owner email, current legal consent, tested credentials, and a successful merchant-verification callback created after the latest credential test. Sandbox merchants can then activate directly. Production merchants enter `pending_approval` and require an independent LynxPay platform administrator. A merchant-bound API key can be issued only after activation; the full key is displayed once and only its digest is stored.
 
 ## Safety rules
 
@@ -23,4 +23,4 @@ The Phase 1 dashboard implements a resumable six-step onboarding flow. LynxPay r
 
 ## Recovery
 
-The browser stores only non-secret wizard progress identifiers in session storage. Reloading or signing in again resumes from the stored step. Credentials must be re-entered if their submission did not complete. Payment status is always re-read from the API. No callback or success result is inferred from browser state.
+The browser does not persist wizard state, bearer tokens, Daraja credentials, or API keys in local or session storage. On each load the Next.js backend-for-frontend reads the authenticated organization, merchant lifecycle, and latest `merchant_verification` payment from tenant-scoped APIs, then derives the first incomplete step. Credentials must be re-entered if their submission did not complete. Verification status is polled from the API and no callback or success result is inferred from browser state.

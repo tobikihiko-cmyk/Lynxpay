@@ -8,6 +8,7 @@ from decimal import Decimal, InvalidOperation
 import json
 import secrets
 import time
+from typing import Literal
 import uuid
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -57,8 +58,8 @@ from app.observability import (
     CALLBACKS_PROCESSED,
     CALLBACKS_RECEIVED,
     DARAJA_REQUEST_DURATION,
-    PAYMENTS_CREATED,
     PAYMENT_OUTCOMES,
+    PAYMENTS_CREATED,
     STK_PUSH_FAILED,
     STK_PUSH_SENT,
 )
@@ -1198,6 +1199,7 @@ def _payments_query(db: Session, principal: Principal):
 def list_payments(
     merchant_id: str | None = None,
     status: str | None = None,
+    purpose: Literal["payment", "merchant_verification"] | None = None,
     environment: str | None = None,
     review_status: str | None = None,
     search: str | None = None,
@@ -1214,6 +1216,8 @@ def list_payments(
         query = query.filter(Payment.merchant_account_id == merchant_id)
     if status:
         query = query.filter(Payment.status == status)
+    if purpose:
+        query = query.filter(Payment.purpose == purpose)
     if environment:
         query = query.filter(Payment.merchant.has(environment=environment))
     if review_status:

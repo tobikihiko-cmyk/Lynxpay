@@ -13,8 +13,8 @@ from app.core.config import settings
 from app.database import MetricsSessionLocal, engine
 from app.observability import (
     MetricsMiddleware,
-    RequestContextMiddleware,
     RedisRateLimitMiddleware,
+    RequestContextMiddleware,
     configure_tracing,
     refresh_database_gauges,
 )

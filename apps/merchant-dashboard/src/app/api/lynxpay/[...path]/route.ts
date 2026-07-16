@@ -14,7 +14,11 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path: st
   const body = ["GET", "HEAD"].includes(request.method) ? undefined : await request.arrayBuffer();
   const send = (access?: string) => backend(target, {
     method: request.method,
-    headers: { "Content-Type": request.headers.get("content-type") || "application/json", ...(access ? { Authorization: `Bearer ${access}` } : {}) },
+    headers: {
+      "Content-Type": request.headers.get("content-type") || "application/json",
+      ...(request.headers.get("idempotency-key") ? { "Idempotency-Key": request.headers.get("idempotency-key")! } : {}),
+      ...(access ? { Authorization: `Bearer ${access}` } : {})
+    },
     body
   });
   let upstream = await send(tokens.access);
