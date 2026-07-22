@@ -194,6 +194,22 @@ def test_production_activation_requires_consent_submission_and_independent_platf
         .one()
     )
     assert approval_audit.actor_user_id == platform_user.id
+    active = client.get(f"{BASE}/admin/merchants?status=active", headers=platform_headers)
+    assert active.status_code == 200, active.text
+    assert [row["id"] for row in active.json()["items"]] == [merchant_data["id"]]
+    suspended = client.post(
+        f"{BASE}/admin/merchants/{merchant_data['id']}/suspend",
+        headers=platform_headers,
+        json={"reason": "Pilot operations suspension drill completed safely"},
+    )
+    assert suspended.status_code == 200, suspended.text
+    assert suspended.json()["status"] == "suspended"
+    assert (
+        db.query(AuditLog)
+        .filter_by(merchant_account_id=merchant_data["id"], action="merchant_suspended")
+        .count()
+        == 1
+    )
 
 
 def test_webhook_read_scope_management_test_delivery_rotation_and_archive(db, client, auth_headers):

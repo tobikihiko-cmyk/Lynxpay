@@ -22,6 +22,13 @@ groups:
         annotations:
           summary: "LynxPay is rejecting more than five requests per second"
           runbook: "docs/runbooks/incident-response.md#rate-limiting"
+      - alert: LynxPayCallbackRateLimited
+        expr: sum(increase(lynxpay_rate_limited_total{class=~"callback.*"}[5m])) > 0
+        for: 1m
+        labels: { severity: page }
+        annotations:
+          summary: "LynxPay rejected callback traffic at the ingress budget"
+          runbook: "docs/runbooks/incident-response.md#callback-rate-limited"
       - alert: LynxPayWebhookDeadLetters
         expr: lynxpay_webhook_deliveries{status="dead_letter"} > 0
         for: 5m
@@ -29,6 +36,13 @@ groups:
         annotations:
           summary: "LynxPay has dead-lettered webhook deliveries"
           runbook: "docs/runbooks/incident-response.md#payment-or-callback-anomaly"
+      - alert: LynxPayOldWebhookBacklog
+        expr: lynxpay_oldest_webhook_age_seconds > 900
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "The oldest undelivered webhook is more than 15 minutes old"
+          runbook: "docs/runbooks/incident-response.md#replay-or-disable-a-webhook"
       - alert: LynxPayEmailDeadLetters
         expr: lynxpay_email_deliveries{status="dead_letter"} > 0
         for: 15m
@@ -43,6 +57,13 @@ groups:
         annotations:
           summary: "LynxPay has payments requiring reconciliation"
           runbook: "docs/runbooks/incident-response.md#payment-or-callback-anomaly"
+      - alert: LynxPayOldReconciliationBacklog
+        expr: lynxpay_oldest_reconciliation_age_seconds > 900
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "A payment has awaited reconciliation for more than 15 minutes"
+          runbook: "docs/runbooks/incident-response.md#investigate-a-missing-customer-payment"
       - alert: LynxPayDatabaseMetricCollectionFailure
         expr: increase(lynxpay_database_gauge_collection_errors_total[10m]) > 0
         for: 5m
@@ -50,3 +71,45 @@ groups:
         annotations:
           summary: "LynxPay cannot collect database-backed operational metrics"
           runbook: "docs/runbooks/incident-response.md#api-errors"
+      - alert: LynxPayStaleStkSubmission
+        expr: lynxpay_stale_stk_submissions > 0
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "An STK submission has exceeded its durable submission lease"
+          runbook: "docs/runbooks/incident-response.md#payment-or-callback-anomaly"
+      - alert: LynxPayUnmatchedCallbacks
+        expr: lynxpay_callbacks{status="unmatched"} > 0
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "M-PESA callbacks require payment-link investigation"
+          runbook: "docs/runbooks/incident-response.md#payment-or-callback-anomaly"
+      - alert: LynxPayWebhookEndpointsPaused
+        expr: lynxpay_webhook_endpoints_paused > 0
+        for: 5m
+        labels: { severity: ticket }
+        annotations:
+          summary: "A merchant webhook endpoint was auto-paused"
+          runbook: "docs/runbooks/incident-response.md#payment-or-callback-anomaly"
+      - alert: LynxPayWorkerHeartbeatMissing
+        expr: lynxpay_worker_heartbeat_age_seconds > 120
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "No LynxPay worker heartbeat has been observed for two minutes"
+          runbook: "docs/runbooks/incident-response.md#worker-heartbeat-missing"
+      - alert: LynxPayDatabasePoolSaturation
+        expr: lynxpay_database_pool_checked_out > 0.9 * 20
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "LynxPay metrics database pool is near its configured capacity"
+          runbook: "docs/runbooks/incident-response.md#database-pool-saturation"
+      - alert: LynxPayDarajaErrorRateHigh
+        expr: sum(rate(lynxpay_stk_push_failed_total[5m])) / clamp_min(sum(rate(lynxpay_payments_created_total[5m])), 0.001) > 0.1
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: "Daraja STK failure/uncertainty rate exceeds 10%"
+          runbook: "docs/runbooks/incident-response.md#daraja-errors"

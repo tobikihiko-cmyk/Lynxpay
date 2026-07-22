@@ -2,6 +2,7 @@
 
 import base64
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 import hashlib
 import hmac
 import json
@@ -190,10 +191,28 @@ class AwsKmsProvider:
         return result["Plaintext"]
 
 
-def _key_provider() -> MasterKeyProvider:
-    if settings.ENCRYPTION_PROVIDER.strip().lower() == "aws_kms":
+@lru_cache(maxsize=16)
+def _configured_key_provider(
+    provider_name: str,
+    local_keys_json: str,
+    kms_key_ids_json: str,
+    aws_region: str,
+) -> MasterKeyProvider:
+    # Configuration values form the cache key so a controlled rotation creates
+    # a new provider/client while in-flight decryptions can finish on the old one.
+    del local_keys_json, kms_key_ids_json, aws_region
+    if provider_name == "aws_kms":
         return AwsKmsProvider()
     return LocalKeyringProvider()
+
+
+def _key_provider() -> MasterKeyProvider:
+    return _configured_key_provider(
+        settings.ENCRYPTION_PROVIDER.strip().lower(),
+        settings.ENCRYPTION_KEYS_JSON,
+        settings.ENCRYPTION_KMS_KEY_IDS_JSON,
+        settings.AWS_REGION,
+    )
 
 
 def is_encrypted_value(value: str | None) -> bool:
@@ -218,17 +237,56 @@ def encrypt_sensitive_value(value: str | None) -> str | None:
     return f"env1::{key_id}::{wrapped_data_key}::{ciphertext}"
 
 
+def encrypt_sensitive_values(values: list[str | None]) -> list[str | None]:
+    """Encrypt a logical secret bundle with one wrapped data key.
+
+    Each field remains independently stored and decryptable for schema
+    compatibility, while KMS performs one wrap/unwrap per bounded operation.
+    """
+
+    plaintext_indexes = [
+        index for index, value in enumerate(values) if value and not is_encrypted_value(value)
+    ]
+    if not plaintext_indexes:
+        return list(values)
+    key_id = settings.ENCRYPTION_ACTIVE_KEY_ID
+    data_key = Fernet.generate_key()
+    wrapped_data_key = _key_provider().wrap(key_id, data_key).decode()
+    cipher = Fernet(data_key)
+    encrypted = list(values)
+    for index in plaintext_indexes:
+        value = values[index]
+        ciphertext = cipher.encrypt(str(value).encode()).decode()
+        encrypted[index] = f"env1::{key_id}::{wrapped_data_key}::{ciphertext}"
+    return encrypted
+
+
 def decrypt_sensitive_value(value: str | None) -> str | None:
-    if not value or not is_encrypted_value(value):
-        return None
-    try:
-        if value.startswith("enc::"):
-            return _legacy_fernet().decrypt(value.removeprefix("enc::").encode()).decode()
-        _, key_id, wrapped_data_key, ciphertext = value.split("::", 3)
-        data_key = _key_provider().unwrap(key_id, wrapped_data_key.encode())
-        return Fernet(data_key).decrypt(ciphertext.encode()).decode()
-    except (InvalidToken, RuntimeError, ValueError):
-        return None
+    return decrypt_sensitive_values([value])[0]
+
+
+def decrypt_sensitive_values(values: list[str | None]) -> list[str | None]:
+    data_keys: dict[tuple[str, str], bytes] = {}
+    decrypted: list[str | None] = []
+    for value in values:
+        if not value or not is_encrypted_value(value):
+            decrypted.append(None)
+            continue
+        try:
+            if value.startswith("enc::"):
+                plaintext = _legacy_fernet().decrypt(value.removeprefix("enc::").encode())
+                decrypted.append(plaintext.decode())
+                continue
+            _, key_id, wrapped_data_key, ciphertext = value.split("::", 3)
+            cache_key = (key_id, wrapped_data_key)
+            data_key = data_keys.get(cache_key)
+            if data_key is None:
+                data_key = _key_provider().unwrap(key_id, wrapped_data_key.encode())
+                data_keys[cache_key] = data_key
+            decrypted.append(Fernet(data_key).decrypt(ciphertext.encode()).decode())
+        except (InvalidToken, RuntimeError, ValueError):
+            decrypted.append(None)
+    return decrypted
 
 
 def reencrypt_sensitive_value(value: str | None) -> str | None:
@@ -242,6 +300,20 @@ def reencrypt_sensitive_value(value: str | None) -> str | None:
     if encryption_key_version(value) == settings.ENCRYPTION_ACTIVE_KEY_ID:
         return value
     return encrypt_sensitive_value(plaintext)
+
+
+def reencrypt_sensitive_values(values: list[str | None]) -> list[str | None]:
+    plaintext = decrypt_sensitive_values(values)
+    if any(
+        value is not None and clear is None for value, clear in zip(values, plaintext, strict=False)
+    ):
+        raise ValueError("One or more sensitive values could not be decrypted")
+    if all(
+        value is None or encryption_key_version(value) == settings.ENCRYPTION_ACTIVE_KEY_ID
+        for value in values
+    ):
+        return list(values)
+    return encrypt_sensitive_values(plaintext)
 
 
 def verify_callback_signature(body: bytes, signature: str | None) -> bool:

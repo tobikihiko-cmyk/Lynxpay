@@ -30,9 +30,13 @@ RLS is only effective when the API connects as a non-owner role without `BYPASSR
 
 - a migration owner role for Alembic only;
 - a non-owner API role for request traffic;
-- a tightly controlled worker role with `BYPASSRLS`, supplied through `WORKER_DATABASE_URL`, because workers must lease due work across organizations.
+- a `NOSUPERUSER NOBYPASSRLS` worker role supplied through `WORKER_DATABASE_URL`; explicit worker-only RLS policies permit cross-tenant queue leasing without bypassing row security;
+- separate `NOSUPERUSER NOBYPASSRLS` platform-admin and metrics roles;
+- an owner/migrator identity used only by provisioning and Alembic.
 
 Do not expose the worker connection string to the API container. Test cross-tenant reads and writes using the actual deployment roles in staging.
+
+Provision roles before migration with `ops/provision-postgres-roles.sql`, run Alembic as `lynxpay_migrator`, then apply `ops/apply-runtime-grants.sql`. Reapply runtime grants after every schema migration so new tables do not silently remain inaccessible or over-privileged.
 
 ## Webhook receiver contract
 

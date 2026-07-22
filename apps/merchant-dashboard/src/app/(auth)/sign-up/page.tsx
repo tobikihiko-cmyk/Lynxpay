@@ -5,6 +5,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { Icon } from "@/components/icons";
+import { apiErrorMessage } from "@/lib/errors";
 
 type Form = { organization_name: string; full_name: string; contact_email: string; contact_phone: string; password: string };
 const journey = ["Create account", "Business profile", "M-PESA setup", "Daraja credentials", "Test payment", "Activation"];
@@ -17,7 +18,7 @@ export default function SignUp() {
     setError("");
     const response = await fetch("/api/session/register", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values) });
     const payload = await response.json();
-    if (!response.ok) { setError(payload.detail || "Registration failed"); return; }
+    if (!response.ok) { setError(apiErrorMessage(payload, "Registration failed")); return; }
     router.replace("/verify-email");
     router.refresh();
   }

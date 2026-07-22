@@ -1,13 +1,15 @@
 import type { SVGProps } from "react";
 
-export type IconName = "payments" | "reconcile" | "onboarding" | "key" | "webhook" | "audit" | "approval" | "search" | "bell" | "menu" | "close" | "arrow" | "shield" | "check" | "clock" | "review" | "refresh";
+export type IconName = "payments" | "callbacks" | "reconcile" | "onboarding" | "key" | "webhook" | "team" | "audit" | "approval" | "search" | "bell" | "menu" | "close" | "arrow" | "shield" | "check" | "clock" | "review" | "refresh";
 
 const paths: Record<IconName, React.ReactNode> = {
   payments: <><path d="M3 7.5h18M6 4h12a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3Z"/><path d="M7 15h3"/></>,
+  callbacks: <><path d="M5 5h14v10H8l-3 3z"/><path d="M9 9h6M9 12h4"/></>,
   reconcile: <><path d="M20 7h-7a4 4 0 0 0-4 4v1"/><path d="m17 4 3 3-3 3M4 17h7a4 4 0 0 0 4-4v-1"/><path d="m7 20-3-3 3-3"/></>,
   onboarding: <><path d="M12 3v18M3 12h18"/><circle cx="12" cy="12" r="9"/></>,
   key: <><circle cx="8" cy="15" r="4"/><path d="m11 12 8-8M15 8l3 3M17 6l2 2"/></>,
   webhook: <><circle cx="6" cy="7" r="3"/><circle cx="18" cy="7" r="3"/><circle cx="12" cy="18" r="3"/><path d="m8.5 8.5 2 6M15.5 8.5l-2 6"/></>,
+  team: <><circle cx="9" cy="8" r="3"/><circle cx="17" cy="10" r="2"/><path d="M3 20c.5-4 2.5-6 6-6s5.5 2 6 6M15 15c3 0 5 1.5 5.5 4"/></>,
   audit: <><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h6M9 17h5"/></>,
   approval: <><path d="M12 3 4 7v5c0 5 3.5 8 8 9 4.5-1 8-4 8-9V7Z"/><path d="m9 12 2 2 4-4"/></>,
   search: <><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></>,

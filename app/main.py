@@ -10,7 +10,9 @@ from sqlalchemy import text
 
 from app import admin, auth, team
 from app.core.config import settings
-from app.database import MetricsSessionLocal, engine
+from app.daraja import close_daraja_clients
+from app.database import MetricsSessionLocal, admin_engine, engine, metrics_engine
+from app.database_roles import validate_runtime_database_role
 from app.observability import (
     MetricsMiddleware,
     RedisRateLimitMiddleware,
@@ -24,6 +26,12 @@ from app.router import router as lynxpay_router
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     settings.validate_runtime()
+    if settings.is_production and settings.PROCESS_TYPE.strip().lower() != "api":
+        raise RuntimeError("The API process requires PROCESS_TYPE=api")
+    validate_runtime_database_role(engine, "API")
+    validate_runtime_database_role(admin_engine, "platform-admin")
+    if settings.METRICS_ENABLED:
+        validate_runtime_database_role(metrics_engine, "metrics")
     with engine.connect() as connection:
         connection.execute(text("SELECT 1"))
     if settings.RATE_LIMIT_ENABLED:
@@ -32,7 +40,10 @@ async def lifespan(_app: FastAPI):
             await redis.ping()
         finally:
             await redis.aclose()
-    yield
+    try:
+        yield
+    finally:
+        await close_daraja_clients()
 
 
 app = FastAPI(

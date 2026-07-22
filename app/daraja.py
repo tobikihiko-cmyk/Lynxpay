@@ -2,16 +2,54 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+import hashlib
+import time
+import weakref
 
 import httpx
+
+from app.observability import DARAJA_TOKEN_CACHE
 
 SANDBOX_BASE_URL = "https://sandbox.safaricom.co.ke"
 PRODUCTION_BASE_URL = "https://api.safaricom.co.ke"
 REDACTION_MASK = "*" * 8
+
+_TOKEN_CACHE: dict[tuple[int, str, str], tuple[str, float]] = {}
+_TOKEN_LOCKS: dict[tuple[int, str, str], asyncio.Lock] = {}
+_HTTP_CLIENTS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def clear_daraja_token_cache() -> None:
+    """Test/rotation hook; no credential material is retained in cache keys."""
+
+    _TOKEN_CACHE.clear()
+    _TOKEN_LOCKS.clear()
+
+
+def _shared_http_client(base_url: str) -> httpx.AsyncClient:
+    loop = asyncio.get_running_loop()
+    clients = _HTTP_CLIENTS.setdefault(loop, {})
+    client = clients.get(base_url)
+    if client is None:
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(15.0, connect=5.0),
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+            trust_env=False,
+        )
+        clients[base_url] = client
+    return client
+
+
+async def close_daraja_clients() -> None:
+    clients = [client for per_loop in list(_HTTP_CLIENTS.values()) for client in per_loop.values()]
+    _HTTP_CLIENTS.clear()
+    for client in clients:
+        await client.aclose()
 
 
 @dataclass(frozen=True)
@@ -34,17 +72,47 @@ class DarajaClient:
         self.base_url = SANDBOX_BASE_URL if environment == "sandbox" else PRODUCTION_BASE_URL
 
     async def get_access_token(self, secrets: DarajaSecrets) -> str:
+        loop_id = id(asyncio.get_running_loop())
+        credential_digest = hashlib.sha256(
+            f"{secrets.consumer_key}\0{secrets.consumer_secret}".encode()
+        ).hexdigest()
+        cache_key = (loop_id, self.base_url, credential_digest)
+        cached = _TOKEN_CACHE.get(cache_key)
+        now = time.monotonic()
+        if cached and cached[1] > now:
+            DARAJA_TOKEN_CACHE.labels("hit").inc()
+            return cached[0]
+        lock = _TOKEN_LOCKS.setdefault(cache_key, asyncio.Lock())
+        async with lock:
+            cached = _TOKEN_CACHE.get(cache_key)
+            now = time.monotonic()
+            if cached and cached[1] > now:
+                DARAJA_TOKEN_CACHE.labels("hit_after_wait").inc()
+                return cached[0]
+            DARAJA_TOKEN_CACHE.labels("miss").inc()
+            token, expires_in = await self._fetch_access_token(secrets)
+            # Safaricom normally returns 3599 seconds. Keep a safety window and
+            # never cache an already-near-expiry token.
+            ttl = max(min(expires_in, 3600) - 30, 1)
+            _TOKEN_CACHE[cache_key] = (token, time.monotonic() + ttl)
+            return token
+
+    async def _fetch_access_token(self, secrets: DarajaSecrets) -> tuple[str, int]:
         basic = base64.b64encode(
             f"{secrets.consumer_key}:{secrets.consumer_secret}".encode()
         ).decode()
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/oauth/v1/generate?grant_type=client_credentials",
-                headers={"Authorization": f"Basic {basic}"},
-                timeout=10,
-            )
-            response.raise_for_status()
-            return response.json()["access_token"]
+        response = await _shared_http_client(self.base_url).get(
+            f"{self.base_url}/oauth/v1/generate?grant_type=client_credentials",
+            headers={"Authorization": f"Basic {basic}"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        try:
+            expires_in = int(payload.get("expires_in", 3599))
+        except (TypeError, ValueError):
+            expires_in = 3599
+        return payload["access_token"], expires_in
 
     async def stk_push(
         self,
@@ -80,16 +148,15 @@ class DarajaClient:
             "TransactionDesc": description,
         }
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/mpesa/stkpush/v1/processrequest",
-                    json=payload,
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Content-Type": "application/json",
-                    },
-                    timeout=15,
-                )
+            response = await _shared_http_client(self.base_url).post(
+                f"{self.base_url}/mpesa/stkpush/v1/processrequest",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                timeout=15,
+            )
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             raise DarajaRequestNotSentError("Daraja connection failed before submission") from exc
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
@@ -125,15 +192,14 @@ class DarajaClient:
             "Timestamp": timestamp,
             "CheckoutRequestID": checkout_request_id,
         }
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/mpesa/stkpushquery/v1/query",
-                json=payload,
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                timeout=15,
-            )
-            response.raise_for_status()
-            return response.json(), payload
+        response = await _shared_http_client(self.base_url).post(
+            f"{self.base_url}/mpesa/stkpushquery/v1/query",
+            json=payload,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        return response.json(), payload
 
 
 def redact_stk_payload(payload: dict) -> dict:

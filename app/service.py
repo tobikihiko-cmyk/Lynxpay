@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.deps import get_client_ip
-from app.core.security import decrypt_sensitive_value, is_encrypted_value
+from app.core.security import decrypt_sensitive_values, is_encrypted_value
 from app.daraja import DarajaSecrets
 from app.deps import Principal
 from app.models import (
@@ -172,11 +172,7 @@ def decrypted_secrets(credential: DarajaCredential) -> DarajaSecrets:
     )
     if not all(is_encrypted_value(value) for value in ciphertexts):
         raise HTTPException(status_code=500, detail="Daraja credential encryption invariant failed")
-    values = (
-        decrypt_sensitive_value(credential.consumer_key_encrypted),
-        decrypt_sensitive_value(credential.consumer_secret_encrypted),
-        decrypt_sensitive_value(credential.passkey_encrypted),
-    )
+    values = decrypt_sensitive_values(list(ciphertexts))
     if not all(values):
         raise HTTPException(status_code=500, detail="Daraja credentials could not be decrypted")
     return DarajaSecrets(*values)
@@ -308,6 +304,9 @@ def callback_view(callback: MpesaCallback, *, include_raw: bool = False) -> dict
         "processing_status": callback.processing_status,
         "processed_at": callback.processed_at.isoformat() if callback.processed_at else None,
         "duplicate_of_callback_id": callback.duplicate_of_callback_id,
+        "linked_at": callback.linked_at.isoformat() if callback.linked_at else None,
+        "linked_by_user_id": callback.linked_by_user_id,
+        "link_reason": callback.link_reason,
         "received_at": callback.received_at.isoformat() if callback.received_at else None,
         "source_ip": callback.source_ip,
     }

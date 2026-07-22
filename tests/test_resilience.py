@@ -2,9 +2,10 @@
 
 from datetime import timedelta
 
+from app import worker
 from app.core.config import Settings, settings
 from app.email_delivery import claim_emails, deliver_claimed_email, enqueue_email
-from app.models import EmailOutbox, User, WebhookDelivery, WebhookEndpoint
+from app.models import EmailOutbox, User, WebhookDelivery, WebhookEndpoint, WorkerHeartbeat
 from app.service import utcnow
 from app.webhooks import claim_deliveries
 
@@ -15,6 +16,9 @@ def test_metrics_endpoint_requires_configured_bearer(client, monkeypatch):
     response = client.get("/metrics", headers={"Authorization": "Bearer metrics-test-secret"})
     assert response.status_code == 200
     assert "lynxpay_http_requests_total" in response.text
+    assert "lynxpay_payments_pending_count" in response.text
+    assert "lynxpay_oldest_webhook_age_seconds" in response.text
+    assert "lynxpay_oldest_reconciliation_age_seconds" in response.text
 
 
 def test_production_configuration_requires_distributed_rate_limiting():
@@ -67,6 +71,65 @@ def test_expired_webhook_lease_is_recovered(db, auth_headers):
     assert claim_deliveries(db, "replacement-worker") == [delivery.id]
     db.refresh(delivery)
     assert delivery.lease_owner == "replacement-worker"
+
+
+async def test_worker_claims_network_jobs_one_at_a_time(monkeypatch):
+    pending = ["job-one", "job-two", "job-three"]
+    events: list[tuple] = []
+
+    class SessionContext:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return False
+
+    def claim(_db, worker_id, limit):
+        events.append(("claim", worker_id, limit))
+        return [pending.pop(0)] if pending else []
+
+    async def process(_db, item_id, worker_id):
+        events.append(("process", worker_id, item_id))
+
+    monkeypatch.setattr(worker, "WorkerSessionLocal", SessionContext)
+    processed = await worker._drain_bounded_queue("worker-one", 2, claim, process)
+
+    assert processed == 2
+    assert pending == ["job-three"]
+    assert events == [
+        ("claim", "worker-one", 1),
+        ("process", "worker-one", "job-one"),
+        ("claim", "worker-one", 1),
+        ("process", "worker-one", "job-two"),
+    ]
+
+
+def test_worker_health_check_requires_recent_queue_heartbeat(db, monkeypatch):
+    class ExistingSession:
+        def __enter__(self):
+            return db
+
+        def __exit__(self, *_args):
+            return False
+
+    heartbeat = WorkerHeartbeat(
+        worker_id="worker-health-test",
+        hostname="worker-container",
+        last_seen_at=utcnow(),
+        processed_total=0,
+        metadata_json={"mode": "webhooks"},
+    )
+    db.add(heartbeat)
+    db.commit()
+    monkeypatch.setattr(worker, "WorkerSessionLocal", ExistingSession)
+    monkeypatch.setattr(settings, "WORKER_HEARTBEAT_MAX_AGE_SECONDS", 120)
+
+    assert worker.worker_is_healthy("webhooks", "worker-container")
+    assert not worker.worker_is_healthy("email", "worker-container")
+
+    heartbeat.last_seen_at = utcnow() - timedelta(seconds=121)
+    db.commit()
+    assert not worker.worker_is_healthy("webhooks", "worker-container")
 
 
 async def test_smtp_failure_is_redacted_and_retried(db, auth_headers, monkeypatch):

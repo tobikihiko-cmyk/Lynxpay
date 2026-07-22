@@ -1,7 +1,7 @@
 # LynxPay Architecture
 
 Status: Core and production-hardening baseline  
-Last updated: 2026-07-15
+Last updated: 2026-07-16
 
 LynxPay is a standalone, tenant-isolated M-PESA Daraja infrastructure service. It is not a payment aggregator. It never holds, pools, settles, transfers, or takes custody of merchant funds. Every merchant supplies and owns its own PayBill, Till, store number, shortcode, and Daraja credentials.
 
@@ -51,6 +51,7 @@ Merchant application / SmartLynxPOS / merchant dashboard
           | webhook dispatch      |-------> merchant HTTPS endpoints
           | Daraja reconciliation |-------> merchant-specific Daraja account
           | identity email        |-------> SMTP provider
+          | STK recovery          |-------> unknown/manual-review queue
           +-----------------------+
 
 API and worker ---------------------------> optional OTLP collector
@@ -80,17 +81,18 @@ The FastAPI process owns synchronous control-plane and payment-plane requests:
 
 - webhook deliveries;
 - missing/ambiguous callback reconciliation;
-- password-reset and invitation email delivery.
+- password-reset and invitation email delivery;
+- recovery of STK submissions left ambiguous by process loss.
 
-Workers claim rows with `FOR UPDATE SKIP LOCKED`, assign a lease owner and expiry, and recover expired leases after a crash. `WORKER_DATABASE_URL` is separate from the API connection so production can give the worker controlled cross-tenant authority without giving it to the API.
+Production deploys independent `webhooks`, `reconciliation`, `email`, and `maintenance` worker modes. Workers claim rows with `FOR UPDATE SKIP LOCKED`, assign a lease owner and expiry, finish an in-flight item during graceful shutdown, and recover expired leases after a crash. Webhook claims are capped per endpoint to prevent one failing merchant from starving others; persistently failing endpoints are automatically paused. `WORKER_DATABASE_URL` is present only in worker processes, while API/admin/metrics credentials are absent from worker containers.
 
 ### Merchant dashboard
 
 The merchant application in `apps/merchant-dashboard/` is an independently built and deployed Next.js service. It is Daraja-specific rather than a generic provider shell: the information hierarchy starts with payment state, captured M-PESA volume, requests awaiting evidence, callbacks, receipts, reconciliation, shortcode, and sandbox/live context.
 
-The browser calls only the dashboard's same-origin `/api/lynxpay/*` routes. This backend-for-frontend forwards requests to FastAPI over the private service network, rotates refresh tokens server-side, and stores access and refresh tokens in `HttpOnly`, `Secure` in production, `SameSite=Lax` cookies. Browser JavaScript never receives or persists bearer tokens. Mutations reject cross-origin requests, auth token endpoints cannot be reached through the generic proxy, and proxied responses are marked `no-store`.
+The browser calls only the dashboard's same-origin `/api/lynxpay/*` routes. This backend-for-frontend forwards requests to FastAPI over the private service network, coalesces concurrent refresh rotations by token digest, and stores access and refresh tokens in `HttpOnly`, `Secure` in production, `SameSite=Strict` cookies. Browser JavaScript never receives or persists bearer tokens. Mutations fail closed unless Origin and Fetch Metadata establish a same-origin request, auth token endpoints cannot be reached through the generic proxy, and proxied responses are marked `no-store`. A Content Security Policy is set at the dashboard boundary; removing the remaining framework-compatible inline allowances through nonces is a further hardening item.
 
-The Next.js and FastAPI runtimes have separate dependency manifests, containers, environment variables, and build pipelines. `LYNXPAY_API_URL` is a private server-only variable and must never use a `NEXT_PUBLIC_` prefix. Docker Compose deploys the Next.js service on the dashboard port and keeps FastAPI as the only authority for identity, tenancy, credentials, payment state, and audit events. The older dependency-free `dashboard/` console remains only as temporary migration coverage and is not part of the deployed runtime.
+The Next.js and FastAPI runtimes have separate dependency manifests, containers, environment variables, and build pipelines. `LYNXPAY_API_URL` is a private server-only variable and must never use a `NEXT_PUBLIC_` prefix. Docker Compose deploys the Next.js service on the dashboard port and keeps FastAPI as the only authority for identity, tenancy, credentials, payment state, and audit events. The superseded dependency-free console was removed after the Next.js application gained callback, reconciliation, webhook, team/MFA, API-key, audit, and production-approval workflows.
 
 ## Data model
 
@@ -137,6 +139,7 @@ The Next.js and FastAPI runtimes have separate dependency manifests, containers,
 - Refresh rotates on every successful use. Reuse of a rotated token revokes the entire token family.
 - Password reset uses an indistinguishable `202` response, hashed one-use tokens, bounded expiry, encrypted email payloads, invalidates older pending reset tokens, and revokes all active sessions when completed.
 - TOTP MFA uses encrypted seeds, rejects reuse of a previously accepted time step, and provides one-use hashed recovery codes. Full secrets and recovery codes are returned only at setup.
+- Owner, admin, operator, developer, support, accountant, and read-only roles map to explicit scopes. Privileged control-plane and raw-callback access requires a recent MFA-authenticated session in production; API keys never receive raw callback bodies.
 - API keys are high-entropy, scoped, explicitly sandbox or production, HMAC-SHA256 digested, and shown only once. Environment predicates prevent test keys from reaching live merchants, and live payment-write keys must be merchant-bound.
 - Invitation tokens are hashed and expire; invitation email content is placed in the encrypted outbox.
 
@@ -146,12 +149,17 @@ The HS256 signing secret must be independently generated and rotated under chang
 
 Every protected endpoint scopes records by `organization_id`. Merchant-bound API keys add an immutable merchant predicate, so a caller cannot escape its merchant by supplying another identifier. Cross-tenant object access returns `404` rather than revealing existence.
 
-Production uses four database identities:
+Production uses seven database identities:
 
 1. Migration owner: owns schema changes and is not used for request traffic.
 2. API role: `NOSUPERUSER NOBYPASSRLS`, with least-privilege DML grants.
-3. Worker role: `NOSUPERUSER BYPASSRLS`, isolated to the worker and controlled maintenance jobs because it must claim work across tenants.
-4. Metrics role: read-only controlled cross-tenant aggregate access through `METRICS_DATABASE_URL`; platform-wide gauges never run through an ordinary tenant-scoped API session.
+3. Worker role: `NOSUPERUSER NOBYPASSRLS`; explicit role-scoped RLS policies allow only the cross-tenant queue and reconciliation work it must claim.
+4. Platform-admin role: `NOSUPERUSER NOBYPASSRLS`; explicit policies support independently authorized operational review without exposing this identity to ordinary API sessions.
+5. Metrics role: `NOSUPERUSER NOBYPASSRLS`, read-only, with explicit aggregate policies through `METRICS_DATABASE_URL`.
+6. Read-only role: no write grants and ordinary tenant RLS unless a separately reviewed support workflow sets tenant context.
+7. Cluster/bootstrap administrator: provisions roles only and is never supplied to an application container.
+
+API, worker, platform-admin, and metrics connections fail production startup if their identity is a superuser, has `BYPASSRLS`, or owns payment-plane tables. API/admin/metrics URLs must be distinct. `PROCESS_TYPE` makes database requirements process-specific: the API container never receives the worker credential, and workers never receive platform-admin or metrics credentials. Role provisioning and post-migration grants live in `ops/provision-postgres-roles.sql` and `ops/apply-runtime-grants.sql`.
 
 After authentication, the API sets transaction-local `app.organization_id`. PostgreSQL RLS independently constrains payments, status checks, credentials, payment attempts, callbacks, ledgers, audit logs, webhook endpoints, deliveries, and delivery attempts.
 
@@ -165,12 +173,12 @@ PostgreSQL also rejects `UPDATE` and `DELETE` against payment-ledger and audit r
 
 LynxPay uses envelope encryption:
 
-1. Generate a random Fernet data key per encrypted value.
-2. Encrypt the secret locally with that data key.
+1. Generate a random Fernet data key per credential/secrets bundle.
+2. Encrypt each secret in that bundle locally with the same short-lived data key.
 3. Wrap only the data key with a versioned local master key or AWS KMS key.
 4. Store an `env1` envelope containing key version, wrapped data key, and ciphertext.
 
-AWS KMS calls bind the encryption context to `service=lynxpay` and the exact key-version label. Plaintext merchant secrets, MFA seeds, webhook secrets, and email payloads are never persisted or logged. API responses expose only masks.
+AWS KMS calls bind the encryption context to `service=lynxpay` and the exact key-version label. Credential bundles require one KMS wrap and one unwrap rather than one remote call per field; the provider/client is process-cached. Plaintext merchant secrets, MFA seeds, webhook secrets, and email payloads are never persisted or logged. API responses expose only masks.
 
 `python -m app.rotate_encryption` supports dry-run and audited apply modes for Daraja credentials, webhook secrets, MFA seeds, and encrypted email payloads. Readers must receive both old and new versions before the active version changes. The old key remains decryptable through the rollback and backup-retention window.
 
@@ -182,12 +190,13 @@ Merchant onboarding follows `pending_setup -> credentials_added -> verified -> a
 
 1. Authenticate and authorize the organization/API-key scope.
 2. Validate active merchant, environment-matching active credentials, positive whole-KES amount, Kenyan phone normalization, merchant reference uniqueness, and optional idempotency key.
-3. Persist `Payment(created)`, ledger/audit evidence, transition to `pending`, and create a redacted `PaymentAttempt`.
-4. Decrypt only that merchant's credentials and call the matching Daraja environment.
+3. Persist `Payment(created)`, ledger/audit evidence, transition to `pending`, and commit a redacted `PaymentAttempt(submitting)` before any provider network call.
+4. Decrypt only that merchant's credentials and call the matching Daraja environment through an environment-isolated pooled HTTP client and single-flight OAuth token cache.
 5. Persist Daraja response identifiers and evidence.
 6. Move to `stk_sent` only when Daraja accepts the request and supplies a CheckoutRequestID.
-7. A definite pre-acceptance rejection becomes `failed`; a timeout, network ambiguity, 5xx, or malformed acceptance response becomes `unknown`. Each outcome writes ledger/audit evidence and queues the corresponding webhook event.
-8. Schedule accepted or ambiguous requests for reconciliation if no callback establishes a terminal result.
+7. Mark the attempt `accepted`, `rejected`, or `uncertain`. A definite pre-acceptance rejection becomes `failed`; a timeout, network ambiguity, 5xx, or malformed acceptance response becomes `unknown`. Each outcome writes ledger/audit evidence and queues the corresponding webhook event.
+8. A maintenance worker converts stale `submitting` attempts to `abandoned` and the payment to `unknown` with audit/ledger evidence. It never silently retries the STK request.
+9. Schedule accepted or ambiguous requests for reconciliation if no callback establishes a terminal result.
 
 Daraja initiation never marks a payment successful. LynxPay does not automatically send a second STK request when acceptance is uncertain.
 
@@ -216,7 +225,7 @@ Database constraints remain the final concurrency guard when multiple API or cal
 7. For success, require `ResultCode=0`, a receipt, matching amount, matching phone when provided, receipt uniqueness, and an allowed state transition.
 8. Atomically commit callback state, payment state, ledger entry, audit event, and webhook outbox rows.
 
-Malformed, rejected, failed, unmatched, duplicate, and conflicting callback rows remain queryable evidence. Raw payloads require the separate `callbacks:read_raw` scope; ordinary callback readers receive normalized fields only.
+Malformed, rejected, failed, unmatched, duplicate, and conflicting callback rows remain queryable evidence. Raw payloads require a recent MFA-authenticated user with the separate `callbacks:read_raw` scope; ordinary callback readers and all API keys receive normalized fields only. A platform-admin-only manual-link workflow can attach unmatched callbacks after exact merchant, amount, phone, receipt, and provider-evidence checks; the reason and actor are immutable audit evidence and a callback cannot be linked twice.
 
 ## Payment state machine
 
@@ -236,10 +245,10 @@ cancelled  (terminal; reserved for an explicit future cancellation workflow)
 
 ## Reconciliation lifecycle
 
-The worker leases due `stk_sent` or `unknown` payments and calls Daraja's STK status-query API with the selected merchant's own credentials. Every provider response or transport ambiguity creates a `PaymentStatusCheck` and audit event.
+The worker briefly leases due `stk_sent` or `unknown` payments, commits the lease and evidence snapshot, releases all row locks, and only then calls Daraja's STK status-query API with the selected merchant's own credentials. It reacquires the lease and current payment evidence before applying the answer. A callback-confirmed success that races the provider call always wins. Every provider response, superseded result, or transport ambiguity creates a `PaymentStatusCheck` and audit event.
 
 - Only verified Daraja `ResultCode=0` can transition an eligible payment to `success`.
-- A verified non-zero result maps to `failed` or `timeout` according to the result.
+- A verified known non-zero result maps through a centralized provider taxonomy to `failed`, `timeout`, or retry/manual review. Unknown provider codes become `unknown`, never an assumed failure.
 - Ambiguous checks retain state and retry.
 - Exhausted `stk_sent` records become `unknown`, never success.
 - `unknown` remains visible for reconciliation or manual review and never triggers automatic re-initiation.
@@ -256,6 +265,7 @@ The dispatcher provides:
 - bounded exponential backoff with jitter;
 - durable attempt history, delivered state, and dead-letter state;
 - replay as a new linked delivery;
+- per-endpoint fair claiming, failure counters, automatic pause, and operator-visible endpoint health;
 - DNS resolution and redirect controls blocking private, loopback, link-local, and cloud-metadata targets;
 - original Host/TLS SNI preservation when connecting to a validated IP;
 - strict connection, total-time, and response-size limits.
@@ -282,6 +292,8 @@ Prometheus metrics include:
 - rate-limit rejections;
 - payments by state;
 - webhook and email deliveries by state;
+- callback processing state and reconciliation backlog;
+- stale STK submissions and paused webhook endpoints;
 - database-gauge collection failures.
 
 `/metrics` requires a bearer token in production and a separate platform metrics database connection. OpenTelemetry can instrument FastAPI, HTTPX, and SQLAlchemy and export through OTLP. Raw callbacks, authorization headers, API keys, phone numbers, email payloads, and decrypted secrets must never be attached to logs, metrics, or trace attributes.
@@ -293,6 +305,7 @@ Alert rules cover API error rate, latency, rate-limit spikes, webhook/email dead
 - PostgreSQL 16 is the required production database.
 - Alembic migrations run once with the migration-owner identity before API/worker rollout.
 - API and worker are separate processes with separate database credentials.
+- `PROCESS_TYPE` validates API and worker configuration independently so no runtime is given unrelated database credentials.
 - The runtime image runs as an unprivileged user and never auto-runs migrations; the migration job is a separate deployment step.
 - Redis is required for production distributed rate limiting.
 - Secrets and provider endpoints come exclusively from environment or the platform secret manager.
@@ -367,6 +380,10 @@ Alert rules cover API error rate, latency, rate-limit spikes, webhook/email dead
 - `GET /health`
 - `GET /ready`
 - `GET /metrics`
+- `POST /api/v1/admin/callbacks/{callback_id}/link-payment`
+- `POST /api/v1/admin/merchants/{merchant_id}/approve`
+- `POST /api/v1/admin/merchants/{merchant_id}/reject`
+- `POST /api/v1/admin/merchants/{merchant_id}/suspend`
 
 ## SmartLynxPOS integration boundary
 
@@ -382,22 +399,25 @@ Migration is merchant-by-merchant. At each cutover, direct initiation pauses, ol
 
 ## Validation status
 
-The local production-style baseline has verified:
+The current local production-style baseline has verified:
 
-- **67 passed, 2 skipped** in the full PostgreSQL-backed test suite at Alembic head `0005_merchant_onboarding`;
+- **106 passed, 4 skipped** in the full Docker/PostgreSQL-backed suite at Alembic head `0012_v2_ledger_coupling`;
 - simultaneous callback processing with one success transition/ledger event;
-- tenant isolation using real `NOSUPERUSER NOBYPASSRLS` API and `NOSUPERUSER BYPASSRLS` worker roles;
+- tenant isolation using real `NOSUPERUSER NOBYPASSRLS` API and worker roles, including role-scoped worker policies;
 - database-trigger rejection of ledger/audit mutation and environment-isolated API keys;
-- provider rejection/uncertainty semantics, evidence-aware callback idempotency, oversized callback handling, and raw-evidence scope separation;
+- database-trigger rejection of a payment status commit without a matching ledger event;
+- durable pre-network STK attempt state, stale-attempt recovery, provider taxonomy, evidence-aware callback idempotency, callback rate classes, trusted-proxy handling, oversized callback handling, and raw-evidence scope separation;
+- reconciliation/callback race handling, Daraja token single-flight caching, pooled clients, and credential-bundle envelope encryption;
 - Redis-backed distributed rate limiting;
-- bounded PostgreSQL-backed load with zero failed requests;
-- database pause/recovery and backup/restore to the current Alembic head;
-- refresh rotation, session revocation, password reset, MFA, encrypted email queueing, and rotation coverage;
-- dashboard semantic, contrast, focus, reduced-motion, JavaScript, CSP, and security-header contracts;
+- explicit RBAC, privileged MFA, refresh single-flight, session revocation, password reset, encrypted email queueing, and rotation coverage;
+- dashboard payment/callback/webhook/team/approval operations, TypeScript, lint, unit, CSP, cookie, and request-origin contracts;
 - resumable six-step merchant onboarding, business profiles, PayBill/Till setup, credential verification, KES 1 callback proof before activation, one-time API-key handoff, and production-mode warnings;
-- a clean Docker test runner, lint/format/security rules, Bandit, and a dependency audit with no known vulnerabilities at the successful audit point.
+- retention reporting that defaults to no deletion and long-lived audit/ledger evidence.
+- a bounded current-artifact HTTP read probe of 500 requests at concurrency 20 with zero failures, 148.3 requests/second, 127.1 ms mean, and 202.8 ms p95 on the local development stack; this is smoke evidence, not a production capacity claim.
 
-See `docs/validation-2026-07-15.md` for commands, measurements, skips, and environment-related failures.
+The four skips are opt-in Safaricom sandbox contract cases requiring dedicated credentials and explicit live-STK consent. Exact final lint, build, dependency-audit, and load-probe results belong in the implementation handoff; they must not be inferred from this document.
+
+See `docs/v2-live-pilot-validation-2026-07-16.md` for the exact commands, failures, skips, role drill, bounded probe, and launch decision from this hardening pass.
 
 ## Remaining production gates
 
@@ -407,7 +427,7 @@ No production-readiness claim is made until these are completed:
 - render and deploy the KMS policy with real role/key ARNs, execute a live rotation, verify CloudTrail, and decrypt a restored backup;
 - validate real SMTP delivery, bounce/complaint processing, and the production OTLP/paging path;
 - expand RLS or database-enforced controls to identity/control-plane bootstrap lookups;
-- replace browser bearer-token storage with a reviewed production session boundary;
+- replace the dashboard CSP inline allowances with reviewed per-request nonces and complete independent assistive-technology testing;
 - run sustained soak, multi-node failure, capacity, disaster-recovery, and regional failover exercises;
 - complete independent penetration testing and assistive-technology accessibility review;
 - execute the documented merchant-by-merchant SmartLynxPOS migration with real source systems and operators.

@@ -210,7 +210,7 @@ def test_rls_hides_and_blocks_cross_tenant_rows_for_non_owner_role(postgres_engi
         connection.execute(
             text(
                 f"CREATE ROLE {worker_role} LOGIN PASSWORD 'worker-test-password-only' "
-                "NOSUPERUSER BYPASSRLS"
+                "NOSUPERUSER NOBYPASSRLS"
             )
         )
         connection.execute(text(f"GRANT USAGE ON SCHEMA public TO {worker_role}"))
@@ -218,6 +218,19 @@ def test_rls_hides_and_blocks_cross_tenant_rows_for_non_owner_role(postgres_engi
             text(
                 f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {worker_role}"
             )
+        )
+        connection.execute(
+            text(
+                "CREATE POLICY lynxpay_worker_test_cross_tenant ON lynxpay_payments "
+                f"FOR SELECT TO {worker_role} USING (true)"
+            )
+        )
+        assert (
+            connection.execute(
+                text("SELECT rolbypassrls FROM pg_roles WHERE rolname = :role"),
+                {"role": worker_role},
+            ).scalar()
+            is False
         )
 
     restricted_url = make_url(URL).set(username=role, password=password)

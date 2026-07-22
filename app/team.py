@@ -25,7 +25,10 @@ public_router = APIRouter(prefix="/auth/invitations", tags=["Authentication"])
 
 class InvitationCreate(BaseModel):
     email: EmailStr
-    role: str = Field(default="member", pattern="^(admin|member)$")
+    role: str = Field(
+        default="operator",
+        pattern="^(admin|operator|developer|support|accountant|read_only)$",
+    )
     expires_in_days: int = Field(default=7, ge=1, le=30)
 
 
@@ -35,7 +38,10 @@ class InvitationAccept(BaseModel):
 
 
 class MemberUpdate(BaseModel):
-    role: str | None = Field(None, pattern="^(owner|admin|member)$")
+    role: str | None = Field(
+        None,
+        pattern="^(owner|admin|operator|developer|support|accountant|read_only)$",
+    )
     status: str | None = Field(None, pattern="^(active|inactive)$")
 
 

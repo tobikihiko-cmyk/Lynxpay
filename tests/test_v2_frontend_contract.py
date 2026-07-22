@@ -69,7 +69,7 @@ def test_bff_keeps_refresh_tokens_out_of_browser_storage_and_rotates_server_side
         if "node_modules" not in path.parts and ".next" not in path.parts
     )
     assert "httpOnly: true" in bff
-    assert 'sameSite: "lax"' in bff
+    assert 'sameSite: "strict"' in bff
     assert "secure" in bff
     assert 'cookies.set("lp_refresh"' in bff
     assert "/api/v1/auth/refresh" in proxy

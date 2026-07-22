@@ -72,7 +72,11 @@ def upgrade() -> None:
             sa.Column(
                 "initiated_by_user_id",
                 sa.String(36),
-                sa.ForeignKey("lynxpay_users.id", ondelete="SET NULL"),
+                sa.ForeignKey(
+                    "lynxpay_users.id",
+                    name="fk_lynxpay_payment_attempts_initiated_user",
+                    ondelete="SET NULL",
+                ),
                 nullable=True,
             )
         )
@@ -80,7 +84,11 @@ def upgrade() -> None:
             sa.Column(
                 "initiated_by_api_key_id",
                 sa.String(36),
-                sa.ForeignKey("lynxpay_api_keys.id", ondelete="SET NULL"),
+                sa.ForeignKey(
+                    "lynxpay_api_keys.id",
+                    name="fk_lynxpay_payment_attempts_initiated_api_key",
+                    ondelete="SET NULL",
+                ),
                 nullable=True,
             )
         )

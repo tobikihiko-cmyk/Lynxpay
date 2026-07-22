@@ -90,7 +90,11 @@ def upgrade() -> None:
             sa.Column(
                 "approved_by_user_id",
                 sa.String(36),
-                sa.ForeignKey("lynxpay_users.id", ondelete="SET NULL"),
+                sa.ForeignKey(
+                    "lynxpay_users.id",
+                    name="fk_lynxpay_merchants_approved_by_user",
+                    ondelete="SET NULL",
+                ),
             )
         )
         batch.add_column(sa.Column("rejected_at", sa.DateTime(timezone=True)))
@@ -105,7 +109,11 @@ def upgrade() -> None:
             sa.Column(
                 "created_by_user_id",
                 sa.String(36),
-                sa.ForeignKey("lynxpay_users.id", ondelete="SET NULL"),
+                sa.ForeignKey(
+                    "lynxpay_users.id",
+                    name="fk_lynxpay_api_keys_created_by_user",
+                    ondelete="SET NULL",
+                ),
             )
         )
         batch.create_index("ix_lynxpay_api_keys_created_by_user_id", ["created_by_user_id"])

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { backend, clearSession, requireSameOrigin, sessionTokens, setSession } from "@/lib/bff";
+import { refreshRotations } from "@/lib/refresh-singleflight";
 
 async function proxy(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
   if (!["GET", "HEAD", "OPTIONS"].includes(request.method)) {
@@ -24,13 +25,16 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path: st
   let upstream = await send(tokens.access);
   let rotated: Record<string, unknown> | null = null;
   if (upstream.status === 401 && tokens.refresh) {
-    const refresh = await backend("/api/v1/auth/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refresh_token: tokens.refresh }) });
-    if (refresh.ok) {
-      const payload = await refresh.json() as Record<string, unknown>;
+    try {
+      const payload = await refreshRotations.run(tokens.refresh, async () => {
+        const refresh = await backend("/api/v1/auth/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refresh_token: tokens.refresh }) });
+        if (!refresh.ok) throw new Error("Session refresh failed");
+        return await refresh.json() as Record<string, unknown>;
+      });
       rotated = payload;
       tokens = { access: String(payload.access_token), refresh: String(payload.refresh_token) };
       upstream = await send(tokens.access);
-    }
+    } catch { /* the 401 response below clears the unusable browser session */ }
   }
   const response = new NextResponse(upstream.body, { status: upstream.status, headers: {
     "Content-Type": upstream.headers.get("content-type") || "application/json",

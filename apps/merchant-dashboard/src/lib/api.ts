@@ -1,3 +1,5 @@
+import { apiErrorMessage } from "./errors";
+
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
@@ -9,7 +11,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
-    throw new ApiError(response.status, payload.detail || "LynxPay request failed");
+    throw new ApiError(response.status, apiErrorMessage(payload, "LynxPay request failed"));
   }
   if (response.status === 204) return undefined as T;
   return response.json();

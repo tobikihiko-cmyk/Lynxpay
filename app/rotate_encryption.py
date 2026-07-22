@@ -5,7 +5,11 @@ from __future__ import annotations
 import argparse
 
 from app.core.config import settings
-from app.core.security import encryption_key_version, reencrypt_sensitive_value
+from app.core.security import (
+    encryption_key_version,
+    reencrypt_sensitive_value,
+    reencrypt_sensitive_values,
+)
 from app.database import WorkerSessionLocal
 from app.models import (
     AuditLog,
@@ -43,10 +47,11 @@ def rotate(*, apply: bool) -> dict[str, int]:
                 continue
             counts["credentials"] += 1
             if apply:
-                for field in fields:
-                    value = getattr(credential, field)
-                    if value:
-                        setattr(credential, field, reencrypt_sensitive_value(value))
+                rotated_values = reencrypt_sensitive_values(
+                    [getattr(credential, field) for field in fields]
+                )
+                for field, value in zip(fields, rotated_values, strict=False):
+                    setattr(credential, field, value)
                 credential.encryption_key_version = settings.ENCRYPTION_ACTIVE_KEY_ID
                 merchant = (
                     db.query(MerchantAccount).filter_by(id=credential.merchant_account_id).one()

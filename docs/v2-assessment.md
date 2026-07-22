@@ -6,7 +6,7 @@ Boundary: Safaricom M-PESA Daraja infrastructure only; LynxPay does not aggregat
 
 ## 1. Existing architecture summary
 
-LynxPay is already a standalone FastAPI service with PostgreSQL/SQLAlchemy persistence, Alembic migrations, a database-leased worker, Redis-backed rate limiting, native identity, an Nginx-served static operations console, and deployment/test containers. The synchronous API persists payment and callback evidence; a separate worker handles webhook delivery, reconciliation, and email outbox work.
+LynxPay is already a standalone FastAPI service with PostgreSQL/SQLAlchemy persistence, Alembic migrations, database-leased workers, Redis-backed rate limiting, native identity, a separately deployed Next.js merchant dashboard, and deployment/test containers. The synchronous API persists payment and callback evidence; separate worker modes handle webhook delivery, reconciliation, email outbox work, and payment recovery.
 
 The payment plane is tenant-scoped in application queries and protected by PostgreSQL row-level security. Credentials use versioned envelope encryption with local-keyring and AWS KMS providers. API keys, refresh tokens, reset tokens, invitation tokens, and recovery codes are stored as hashes. Payment ledger and audit records are append-only in both SQLAlchemy and PostgreSQL.
 
@@ -14,23 +14,17 @@ Daraja remains a concrete integration rather than a generic provider framework. 
 
 ## 2. Current frontend state
 
-### Working
+### Current implementation
 
-- The `dashboard/` console is dependency-free, Daraja-specific, responsive, keyboard-aware, reduced-motion aware, and protected by restrictive Nginx browser headers.
-- It supports registration, sign-in, recovery, MFA input, the six-step onboarding sequence, organization profile, PayBill/Till/store-number setup, credential verification, KES 1 verification, activation, STK Push, payments, and callback logs.
-- Its information hierarchy correctly distinguishes STK acceptance from verified payment success and exposes sandbox/live context.
-
-### Missing or risky
-
-- It is still a single-file JavaScript application without typed API contracts, route-level modules, component tests, error boundaries, or a maintainable design-system boundary.
-- Access and refresh tokens are stored in `sessionStorage`; this is not an acceptable final production administrative boundary.
-- There are no payment-detail/timeline, reconciliation, API-key management, webhook management, audit-log, team/session, or platform-admin views.
-- Payment lists have no URL-persisted filters, cursor pagination, search, or detail drill-down.
-- The console has static accessibility contract tests but no browser interaction suite.
+- `apps/merchant-dashboard/` is the sole frontend and is independently built and deployed with Next.js and TypeScript.
+- A same-origin backend-for-frontend keeps access and rotating refresh tokens in HttpOnly cookies rather than browser storage.
+- The dashboard covers registration, recovery, onboarding, PayBill/Till credentials, KES 1 verification, payments and detail, callbacks, reconciliation, API keys, webhooks and replay, audit, team/MFA, and platform merchant approval/suspension.
+- Its information hierarchy distinguishes STK acceptance from verified payment success and exposes sandbox/live context.
+- Lint, TypeScript, unit/security contracts, production builds, and container builds run in CI.
 
 ### Version 2 decision
 
-Keep `dashboard/` as the internal/operational console during migration. Build `apps/merchant-dashboard/` as the merchant-facing application with Next.js, TypeScript, a same-origin backend-for-frontend session boundary, typed forms, route modules, and browser tests. Do not delete the internal console until the new application covers recovery and operational workflows.
+The migration condition was satisfied. The dependency-free static console and its tests were removed on 2026-07-17 so there is one frontend architecture, one session boundary, and one operational user experience to maintain.
 
 ## 3. Current backend state
 

@@ -666,7 +666,7 @@ def test_stk_request_not_sent_becomes_failed(db, client, api_headers, merchant, 
     assert response.status_code == 201
     assert response.json()["status"] == "failed"
     payment = db.query(Payment).filter_by(external_reference="NOT-SENT").one()
-    assert payment.attempts[0].status == "failed"
+    assert payment.attempts[0].status == "not_sent"
     assert (
         db.query(PaymentLedgerEntry)
         .filter_by(payment_id=payment.id, event_type="payment.failed")
@@ -686,7 +686,7 @@ def test_stk_uncertain_transport_becomes_unknown(db, client, api_headers, mercha
     assert response.json()["status"] == "unknown"
     payment = db.query(Payment).filter_by(external_reference="UNCERTAIN").one()
     assert payment.checkout_request_id is None
-    assert payment.attempts[0].status == "unknown"
+    assert payment.attempts[0].status == "uncertain"
 
 
 @pytest.mark.parametrize(
@@ -743,7 +743,7 @@ def test_callback_success_updates_payment_and_preserves_raw_payload(
     raw_key = raw_key_response.json()["api_key"]
     evidence = client.get(f"{BASE}/callbacks/{callback.id}", headers={"X-API-Key": raw_key})
     assert evidence.status_code == 200
-    assert evidence.json()["raw_payload"] == payload
+    assert "raw_payload" not in evidence.json()
 
 
 def test_callback_failure_updates_payment(db, client, merchant, stk_payment, monkeypatch):
@@ -753,6 +753,22 @@ def test_callback_failure_updates_payment(db, client, merchant, stk_payment, mon
     payment = db.query(Payment).filter(Payment.id == stk_payment["id"]).one()
     assert payment.status == "failed"
     assert payment.result_code == "1032"
+
+
+def test_unrecognized_callback_result_is_reviewable_not_terminal_failure(
+    db, client, merchant, stk_payment, monkeypatch
+):
+    monkeypatch.setattr(settings, "MPESA_CALLBACK_IP_ALLOWLIST", "")
+    payload = _failure_callback()
+    payload["Body"]["stkCallback"]["ResultCode"] = 5555
+    payload["Body"]["stkCallback"]["ResultDesc"] = "A new provider result not yet classified"
+    response = client.post(f"{BASE}/callbacks/mpesa/{merchant['id']}", json=payload)
+    assert response.status_code == 200
+    payment = db.query(Payment).filter_by(id=stk_payment["id"]).one()
+    assert payment.status == "unknown"
+    assert payment.review_status == "needs_review"
+    assert payment.review_reason == "provider_result_unrecognized_provider_result"
+    assert payment.failed_at is None
 
 
 def test_duplicate_callback_is_stored_but_idempotent(

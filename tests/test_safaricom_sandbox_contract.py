@@ -1,5 +1,6 @@
 """Opt-in Safaricom sandbox contract checks; never run or initiate STK by default."""
 
+from decimal import Decimal
 import os
 
 import pytest
@@ -41,3 +42,43 @@ async def test_sandbox_existing_checkout_status_contract():
     )
     assert isinstance(response, dict)
     assert "ResultCode" in response or "ResponseCode" in response or "errorCode" in response
+
+
+async def _stk_contract(*, shortcode_type: str) -> None:
+    if os.getenv("RUN_DARAJA_SANDBOX_STK_TESTS") != "1":
+        pytest.skip("set RUN_DARAJA_SANDBOX_STK_TESTS=1 to authorize a KES 1 STK request")
+    phone = os.getenv("DARAJA_SANDBOX_TEST_PHONE")
+    callback_url = os.getenv("DARAJA_SANDBOX_CALLBACK_URL")
+    shortcode = os.getenv("DARAJA_SANDBOX_SHORTCODE")
+    till_number = os.getenv("DARAJA_SANDBOX_TILL_NUMBER") if shortcode_type == "till" else None
+    if not phone or not callback_url or not shortcode:
+        pytest.skip("STK contract requires phone, callback URL, and shortcode")
+    if shortcode_type == "till" and not till_number:
+        pytest.skip("Till contract requires DARAJA_SANDBOX_TILL_NUMBER")
+    assert callback_url.startswith("https://")
+    response, payload = await DarajaClient("sandbox").stk_push(
+        secrets=_secrets(),
+        shortcode=shortcode,
+        till_number=till_number,
+        shortcode_type=shortcode_type,
+        phone=phone,
+        amount=Decimal("1"),
+        external_reference=f"LYNXPAY-{shortcode_type.upper()}-CONTRACT",
+        description="LynxPay controlled sandbox contract",
+        callback_url=callback_url,
+    )
+    assert payload["TransactionType"] == (
+        "CustomerPayBillOnline" if shortcode_type == "paybill" else "CustomerBuyGoodsOnline"
+    )
+    assert response.get("CheckoutRequestID")
+    assert str(response.get("ResponseCode")) == "0"
+
+
+@pytest.mark.asyncio
+async def test_sandbox_paybill_stk_contract():
+    await _stk_contract(shortcode_type="paybill")
+
+
+@pytest.mark.asyncio
+async def test_sandbox_till_stk_contract():
+    await _stk_contract(shortcode_type="till")

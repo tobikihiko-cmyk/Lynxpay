@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 import time
+import uuid
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -19,6 +20,7 @@ from app.models import (
     PaymentStatusCheck,
 )
 from app.observability import DARAJA_REQUEST_DURATION, PAYMENT_OUTCOMES, RECONCILIATION_CHECKS
+from app.provider_codes import classify_mpesa_result
 from app.service import (
     audit,
     decrypted_secrets,
@@ -87,6 +89,10 @@ async def reconcile_payment(
     *,
     worker_id: str | None = None,
 ) -> PaymentStatusCheck | None:
+    # Phase 1: establish a short durable lease and snapshot the immutable
+    # provider request evidence. No Daraja network call occurs while a payment
+    # row lock or database transaction is held.
+    effective_worker_id = worker_id or f"manual-reconcile-{uuid.uuid4()}"
     query = db.query(Payment).filter(Payment.id == payment_id)
     if db.bind and db.bind.dialect.name == "postgresql":
         query = query.with_for_update()
@@ -99,98 +105,155 @@ async def reconcile_payment(
         return None
     if worker_id and payment.reconciliation_lease_owner != worker_id:
         return None
+    if not worker_id:
+        now = utcnow()
+        active_other_lease = (
+            payment.reconciliation_lease_owner
+            and payment.reconciliation_lease_expires_at
+            and ensure_utc_datetime(payment.reconciliation_lease_expires_at) > now
+        )
+        if active_other_lease:
+            return None
+        payment.reconciliation_lease_owner = effective_worker_id
+        payment.reconciliation_lease_expires_at = now + timedelta(
+            seconds=settings.WEBHOOK_LEASE_SECONDS
+        )
+    snapshot = {
+        "organization_id": payment.organization_id,
+        "merchant_account_id": payment.merchant_account_id,
+        "checkout_request_id": payment.checkout_request_id,
+    }
     merchant = (
         db.query(MerchantAccount).filter(MerchantAccount.id == payment.merchant_account_id).first()
     )
     credential = _active_credential(db, payment.merchant_account_id)
-    now = utcnow()
-    payment.reconciliation_attempts += 1
-    payment.last_reconciled_at = now
+    environment = merchant.environment if merchant else None
+    shortcode = credential.shortcode if credential else None
+    if credential:
+        db.expunge(credential)
+    db.commit()
+
     outcome = "ambiguous"
     response: dict = {}
     code: str | None = None
     description: str | None = None
-    attempt = (
-        db.query(PaymentAttempt)
-        .filter(
-            PaymentAttempt.payment_id == payment.id,
-            PaymentAttempt.checkout_request_id == payment.checkout_request_id,
-        )
-        .first()
-    )
-
     try:
-        if not merchant or not credential:
+        if not environment or not credential or not shortcode:
             raise RuntimeError("Active merchant credentials are unavailable")
-        client = DarajaClient(merchant.environment)
+        client = DarajaClient(environment)
         started = time.perf_counter()
         try:
             response, _ = await client.query_stk_status(
                 secrets=decrypted_secrets(credential),
-                shortcode=credential.shortcode,
-                checkout_request_id=payment.checkout_request_id,
+                shortcode=shortcode,
+                checkout_request_id=snapshot["checkout_request_id"],
             )
         finally:
-            DARAJA_REQUEST_DURATION.labels("stk_status_query", merchant.environment).observe(
+            DARAJA_REQUEST_DURATION.labels("stk_status_query", environment).observe(
                 time.perf_counter() - started
             )
         code = str(response["ResultCode"]) if response.get("ResultCode") is not None else None
         description = response.get("ResultDesc") or response.get("ResponseDescription")
-        if code == "0":
-            transition_and_record(
-                db,
-                payment=payment,
-                target="success",
-                event_type="payment.success",
-                details={"source": "daraja_status_query"},
-            )
-            payment.result_code = code
-            payment.result_description = description
-            payment.paid_at = now
-            payment.success_source = "status_query"
-            payment.provider_acceptance_state = "accepted"
-            if payment.mpesa_receipt_number:
-                payment.receipt_status = "present"
-                payment.review_status = "none"
-                payment.review_reason = None
-            else:
-                payment.receipt_status = "missing"
-                payment.review_status = "needs_review"
-                payment.review_reason = "status_query_success_missing_receipt"
-            if attempt:
-                attempt.status = "succeeded"
-            queue_webhooks(db, payment, "payment.success")
-            outcome = "success"
-        elif code is not None:
-            target = "timeout" if payment.status == "stk_sent" and code == "1037" else "failed"
+    except Exception as exc:
+        response = {"transport_error": exc.__class__.__name__}
+        description = "Daraja status could not be verified"
+
+    # Phase 2: reacquire the row and apply only if the lease and request
+    # evidence still match. A callback may have completed the payment while the
+    # provider call was in flight; that success always wins.
+    query = db.query(Payment).filter(Payment.id == payment_id)
+    if db.bind and db.bind.dialect.name == "postgresql":
+        query = query.with_for_update()
+    payment = query.first()
+    if not payment or payment.reconciliation_lease_owner != effective_worker_id:
+        db.rollback()
+        return None
+    now = utcnow()
+    evidence_changed = payment.checkout_request_id != snapshot["checkout_request_id"]
+    status_superseded = payment.status not in {"stk_sent", "unknown"}
+    payment.reconciliation_attempts += 1
+    payment.last_reconciled_at = now
+    attempt = (
+        db.query(PaymentAttempt)
+        .filter(
+            PaymentAttempt.payment_id == payment.id,
+            PaymentAttempt.checkout_request_id == snapshot["checkout_request_id"],
+        )
+        .first()
+    )
+
+    if evidence_changed or status_superseded:
+        outcome = "superseded"
+        description = (
+            "Payment was completed while reconciliation was in flight"
+            if payment.status == "success"
+            else "Payment evidence changed while reconciliation was in flight"
+        )
+    elif code == "0":
+        transition_and_record(
+            db,
+            payment=payment,
+            target="success",
+            event_type="payment.success",
+            details={"source": "daraja_status_query"},
+        )
+        payment.result_code = code
+        payment.result_description = description
+        payment.paid_at = now
+        payment.success_source = "status_query"
+        payment.provider_acceptance_state = "accepted"
+        if payment.mpesa_receipt_number:
+            payment.receipt_status = "present"
+            payment.review_status = "none"
+            payment.review_reason = None
+        else:
+            payment.receipt_status = "missing"
+            payment.review_status = "needs_review"
+            payment.review_reason = "status_query_success_missing_receipt"
+        if attempt:
+            attempt.status = "succeeded"
+        queue_webhooks(db, payment, "payment.success")
+        outcome = "success"
+    elif code is not None:
+        classified = classify_mpesa_result(code)
+        target = (
+            "failed"
+            if payment.status == "unknown" and classified.target == "timeout"
+            else classified.target
+        )
+        if target != "unknown" or payment.status != "unknown":
             transition_and_record(
                 db,
                 payment=payment,
                 target=target,
                 event_type=f"payment.{target}",
-                details={"source": "daraja_status_query", "result_code": code},
+                details={
+                    "source": "daraja_status_query",
+                    "result_code": code,
+                    "provider_category": classified.category,
+                },
             )
-            payment.result_code = code
-            payment.result_description = description
-            payment.failed_at = now
-            payment.provider_acceptance_state = "accepted"
-            payment.receipt_status = "not_applicable"
-            payment.review_status = "none"
-            payment.review_reason = None
-            if attempt:
-                attempt.status = target
-            queue_webhooks(db, payment, f"payment.{target}")
-            outcome = target
-    except Exception as exc:
-        response = {"transport_error": exc.__class__.__name__}
-        description = "Daraja status could not be verified"
+        payment.result_code = code
+        payment.result_description = description
+        payment.failed_at = now if target in {"failed", "timeout"} else None
+        payment.provider_acceptance_state = "accepted"
+        payment.receipt_status = "not_applicable" if target != "unknown" else "missing"
+        payment.review_status = "needs_review" if classified.needs_review else "none"
+        payment.review_reason = (
+            f"provider_result_{classified.category}" if classified.needs_review else None
+        )
+        if attempt:
+            attempt.status = "uncertain" if target == "unknown" else target
+        queue_webhooks(db, payment, f"payment.{target}")
+        outcome = target
+    else:
         payment.provider_acceptance_state = "uncertain"
 
     check = PaymentStatusCheck(
-        organization_id=payment.organization_id,
-        merchant_account_id=payment.merchant_account_id,
+        organization_id=snapshot["organization_id"],
+        merchant_account_id=snapshot["merchant_account_id"],
         payment_id=payment.id,
-        checkout_request_id=payment.checkout_request_id,
+        checkout_request_id=snapshot["checkout_request_id"],
         result_code=code,
         result_description=description,
         raw_response=response,

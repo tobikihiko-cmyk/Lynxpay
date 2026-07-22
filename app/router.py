@@ -19,8 +19,9 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.deps import get_client_ip, get_db, ip_in_cidrs
 from app.core.security import (
-    decrypt_sensitive_value,
+    decrypt_sensitive_values,
     encrypt_sensitive_value,
+    encrypt_sensitive_values,
     encryption_key_version,
     hash_opaque_token,
     verify_callback_signature,
@@ -63,6 +64,7 @@ from app.observability import (
     STK_PUSH_FAILED,
     STK_PUSH_SENT,
 )
+from app.provider_codes import classify_mpesa_result
 from app.reconciliation import reconcile_payment
 from app.schemas import (
     ApiKeyCreate,
@@ -187,6 +189,13 @@ def _attempt_view(attempt: PaymentAttempt) -> dict:
         "checkout_request_id": attempt.checkout_request_id,
         "response_code": attempt.response_code,
         "response_description": attempt.response_description,
+        "submission_started_at": attempt.submission_started_at.isoformat()
+        if attempt.submission_started_at
+        else None,
+        "provider_responded_at": attempt.provider_responded_at.isoformat()
+        if attempt.provider_responded_at
+        else None,
+        "abandoned_at": attempt.abandoned_at.isoformat() if attempt.abandoned_at else None,
         "created_at": attempt.created_at.isoformat() if attempt.created_at else None,
         "updated_at": attempt.updated_at.isoformat() if attempt.updated_at else None,
     }
@@ -521,15 +530,24 @@ def _write_credential(
     )
     if current:
         current.is_active = False
-    encrypted_consumer_key = encrypt_sensitive_value(values["consumer_key"])
+    encrypted_values = encrypt_sensitive_values(
+        [
+            values["consumer_key"],
+            values["consumer_secret"],
+            values["passkey"],
+            values.get("initiator_name"),
+            values.get("security_credential"),
+        ]
+    )
+    encrypted_consumer_key = encrypted_values[0]
     credential = DarajaCredential(
         merchant_account_id=merchant.id,
         consumer_key_encrypted=encrypted_consumer_key,
-        consumer_secret_encrypted=encrypt_sensitive_value(values["consumer_secret"]),
-        passkey_encrypted=encrypt_sensitive_value(values["passkey"]),
+        consumer_secret_encrypted=encrypted_values[1],
+        passkey_encrypted=encrypted_values[2],
         shortcode=values["shortcode"],
-        initiator_name_encrypted=encrypt_sensitive_value(values.get("initiator_name")),
-        security_credential_encrypted=encrypt_sensitive_value(values.get("security_credential")),
+        initiator_name_encrypted=encrypted_values[3],
+        security_credential_encrypted=encrypted_values[4],
         environment=merchant.environment,
         encryption_key_version=encryption_key_version(encrypted_consumer_key),
         is_active=True,
@@ -599,13 +617,22 @@ def update_daraja_credential(
     updates = payload.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(status_code=422, detail="At least one credential field is required")
+    decrypted = decrypt_sensitive_values(
+        [
+            current.consumer_key_encrypted,
+            current.consumer_secret_encrypted,
+            current.passkey_encrypted,
+            current.initiator_name_encrypted,
+            current.security_credential_encrypted,
+        ]
+    )
     current_values = {
-        "consumer_key": decrypt_sensitive_value(current.consumer_key_encrypted),
-        "consumer_secret": decrypt_sensitive_value(current.consumer_secret_encrypted),
-        "passkey": decrypt_sensitive_value(current.passkey_encrypted),
+        "consumer_key": decrypted[0],
+        "consumer_secret": decrypted[1],
+        "passkey": decrypted[2],
         "shortcode": current.shortcode,
-        "initiator_name": decrypt_sensitive_value(current.initiator_name_encrypted),
-        "security_credential": decrypt_sensitive_value(current.security_credential_encrypted),
+        "initiator_name": decrypted[3],
+        "security_credential": decrypted[4],
     }
     for key, value in updates.items():
         current_values[key] = (
@@ -873,7 +900,8 @@ async def _submit_stk_attempt(
         )
     except DarajaRequestNotSentError:
         STK_PUSH_FAILED.labels("not_sent").inc()
-        attempt.status = "failed"
+        attempt.status = "not_sent"
+        attempt.provider_responded_at = utcnow()
         attempt.response_description = "Daraja STK request was not submitted"
         payment.provider_acceptance_state = "rejected"
         payment.receipt_status = "not_applicable"
@@ -905,7 +933,8 @@ async def _submit_stk_attempt(
         return _payment_attempt_result(payment, attempt)
     except Exception:
         STK_PUSH_FAILED.labels("uncertain").inc()
-        attempt.status = "unknown"
+        attempt.status = "uncertain"
+        attempt.provider_responded_at = utcnow()
         attempt.response_description = "Daraja acceptance could not be verified"
         payment.provider_acceptance_state = "uncertain"
         payment.review_status = "needs_review"
@@ -930,6 +959,7 @@ async def _submit_stk_attempt(
 
     attempt.request_payload_redacted = redact_stk_payload(sent_payload)
     attempt.response_payload = response
+    attempt.provider_responded_at = utcnow()
     attempt.merchant_request_id = response.get("MerchantRequestID")
     attempt.checkout_request_id = response.get("CheckoutRequestID")
     attempt.response_code = str(response.get("ResponseCode", ""))
@@ -938,7 +968,7 @@ async def _submit_stk_attempt(
     )
     if attempt.response_code != "0":
         STK_PUSH_FAILED.labels("provider_rejected").inc()
-        attempt.status = "failed"
+        attempt.status = "rejected"
         payment.provider_acceptance_state = "rejected"
         payment.receipt_status = "not_applicable"
         payment.review_status = "none"
@@ -960,7 +990,7 @@ async def _submit_stk_attempt(
         return _payment_attempt_result(payment, attempt)
     if not attempt.checkout_request_id:
         STK_PUSH_FAILED.labels("missing_checkout_request_id").inc()
-        attempt.status = "unknown"
+        attempt.status = "uncertain"
         payment.provider_acceptance_state = "uncertain"
         payment.review_status = "needs_review"
         payment.review_reason = "accepted_without_checkout_request_id"
@@ -1165,7 +1195,8 @@ async def create_stk_push(
             "amount": str(payment.amount),
             "external_reference": payment.external_reference,
         },
-        status="created",
+        status="submitting",
+        submission_started_at=utcnow(),
         attempt_type="initial",
         initiated_by_user_id=principal.user_id,
         initiated_by_api_key_id=principal.api_key_id,
@@ -1796,7 +1827,7 @@ async def receive_mpesa_callback(merchant_id: str, request: Request, db: Session
                 MpesaCallback.checkout_request_id == fields["checkout_request_id"],
                 MpesaCallback.result_code == fields["result_code"],
                 MpesaCallback.result_description == fields["result_description"],
-                MpesaCallback.processing_status == "processed_failure",
+                MpesaCallback.processing_status.in_(["processed_failure", "processed_unknown"]),
             )
             .order_by(MpesaCallback.received_at.asc())
             .first()
@@ -1984,26 +2015,40 @@ async def receive_mpesa_callback(merchant_id: str, request: Request, db: Session
                         metadata={"reason": reason},
                     )
         else:
-            target = "timeout" if fields["result_code"] in {"1037"} else "failed"
-            transition_and_record(
-                db,
-                payment=payment,
-                target=target,
-                event_type=f"payment.{target}",
-                request=request,
-                details={"callback_id": callback.id, "result_code": fields["result_code"]},
+            classified = classify_mpesa_result(fields["result_code"])
+            target = (
+                "failed"
+                if payment.status == "unknown" and classified.target == "timeout"
+                else classified.target
             )
+            if target != "unknown" or payment.status != "unknown":
+                transition_and_record(
+                    db,
+                    payment=payment,
+                    target=target,
+                    event_type=f"payment.{target}",
+                    request=request,
+                    details={
+                        "callback_id": callback.id,
+                        "result_code": fields["result_code"],
+                        "provider_category": classified.category,
+                    },
+                )
             payment.result_code = fields["result_code"]
             payment.result_description = fields["result_description"]
-            payment.failed_at = utcnow()
+            payment.failed_at = utcnow() if target in {"failed", "timeout"} else None
             payment.provider_acceptance_state = "accepted"
-            payment.receipt_status = "not_applicable"
-            payment.review_status = "none"
-            payment.review_reason = None
+            payment.receipt_status = "not_applicable" if target != "unknown" else "missing"
+            payment.review_status = "needs_review" if classified.needs_review else "none"
+            payment.review_reason = (
+                f"provider_result_{classified.category}" if classified.needs_review else None
+            )
             if matched_attempt:
-                matched_attempt.status = target
+                matched_attempt.status = "uncertain" if target == "unknown" else target
             event_type = f"payment.{target}"
-            callback.processing_status = "processed_failure"
+            callback.processing_status = (
+                "processed_unknown" if target == "unknown" else "processed_failure"
+            )
     except InvalidPaymentTransitionError as exc:
         callback.processing_status = "conflict"
         payment.review_status = "needs_review"
@@ -2076,7 +2121,11 @@ def list_callbacks(
         query = query.filter(MpesaCallback.received_at < before)
     page_size = min(max(limit, 1), 500)
     records = query.order_by(MpesaCallback.received_at.desc()).limit(page_size).all()
-    include_raw = "*" in principal.scopes or "callbacks:read_raw" in principal.scopes
+    include_raw = bool(
+        principal.user_id
+        and "callbacks:read_raw" in principal.scopes
+        and (not settings.REQUIRE_PRIVILEGED_MFA or principal.mfa_authenticated)
+    )
     return {
         "items": [callback_view(item, include_raw=include_raw) for item in records],
         "next_before": records[-1].received_at.isoformat() if len(records) == page_size else None,
@@ -2092,7 +2141,11 @@ def get_callback(
     callback = _callbacks_query(db, principal).filter(MpesaCallback.id == callback_id).first()
     if not callback:
         raise HTTPException(status_code=404, detail="Callback not found")
-    include_raw = "*" in principal.scopes or "callbacks:read_raw" in principal.scopes
+    include_raw = bool(
+        principal.user_id
+        and "callbacks:read_raw" in principal.scopes
+        and (not settings.REQUIRE_PRIVILEGED_MFA or principal.mfa_authenticated)
+    )
     return callback_view(callback, include_raw=include_raw)
 
 
@@ -2160,6 +2213,9 @@ def _webhook_endpoint_view(endpoint: WebhookEndpoint) -> dict:
         "url": endpoint.url,
         "event_types": endpoint.event_types,
         "status": endpoint.status,
+        "consecutive_failures": endpoint.consecutive_failures,
+        "paused_at": endpoint.paused_at.isoformat() if endpoint.paused_at else None,
+        "pause_reason": endpoint.pause_reason,
         "created_at": endpoint.created_at.isoformat() if endpoint.created_at else None,
         "updated_at": endpoint.updated_at.isoformat() if endpoint.updated_at else None,
     }
@@ -2247,6 +2303,10 @@ def update_webhook_endpoint(
         changes["url"] = new_url
     for field, value in changes.items():
         setattr(endpoint, field, value)
+    if changes.get("status") == "active":
+        endpoint.consecutive_failures = 0
+        endpoint.paused_at = None
+        endpoint.pause_reason = None
     audit(
         db,
         organization_id=principal.organization_id,

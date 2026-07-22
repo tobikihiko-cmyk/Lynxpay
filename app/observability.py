@@ -18,7 +18,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 from app.core.config import settings
-from app.core.deps import get_client_ip
+from app.core.deps import get_client_ip, ip_in_cidrs
 
 HTTP_REQUESTS = Counter(
     "lynxpay_http_requests_total", "HTTP requests", ["method", "route", "status"]
@@ -30,8 +30,27 @@ RATE_LIMITED = Counter("lynxpay_rate_limited_total", "Rate-limited requests", ["
 WEBHOOK_QUEUE = Gauge("lynxpay_webhook_deliveries", "Webhook deliveries by state", ["status"])
 EMAIL_QUEUE = Gauge("lynxpay_email_deliveries", "Email outbox rows by state", ["status"])
 PAYMENTS_STATE = Gauge("lynxpay_payments", "Payments by state", ["status"])
+PAYMENTS_PENDING_COUNT = Gauge("lynxpay_payments_pending_count", "Pending payments")
+PAYMENTS_UNKNOWN_COUNT = Gauge("lynxpay_payments_unknown_count", "Unknown payments")
 WORKER_HEARTBEAT_AGE = Gauge(
     "lynxpay_worker_heartbeat_age_seconds", "Age of the freshest durable worker heartbeat"
+)
+CALLBACKS_STATE = Gauge("lynxpay_callbacks", "M-PESA callbacks by processing state", ["status"])
+RECONCILIATION_BACKLOG = Gauge(
+    "lynxpay_reconciliation_backlog", "Payments currently eligible for reconciliation"
+)
+OLDEST_RECONCILIATION_AGE = Gauge(
+    "lynxpay_oldest_reconciliation_age_seconds",
+    "Age of the oldest payment eligible for reconciliation",
+)
+STALE_STK_SUBMISSIONS = Gauge(
+    "lynxpay_stale_stk_submissions", "STK attempts stuck in submitting state"
+)
+WEBHOOK_ENDPOINTS_PAUSED = Gauge(
+    "lynxpay_webhook_endpoints_paused", "Webhook endpoints paused after repeated failures"
+)
+OLDEST_WEBHOOK_AGE = Gauge(
+    "lynxpay_oldest_webhook_age_seconds", "Age of the oldest undelivered webhook"
 )
 DATABASE_POOL_CHECKED_OUT = Gauge(
     "lynxpay_database_pool_checked_out", "Checked-out connections in the metrics database pool"
@@ -64,6 +83,9 @@ DARAJA_REQUEST_DURATION = Histogram(
     "Daraja request latency",
     ["operation", "environment"],
 )
+DARAJA_TOKEN_CACHE = Counter(
+    "lynxpay_daraja_token_cache_total", "Daraja OAuth token cache outcomes", ["outcome"]
+)
 
 LOGGER = logging.getLogger("lynxpay.requests")
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{8,100}$")
@@ -72,7 +94,15 @@ REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{8,100}$")
 def refresh_database_gauges(db) -> None:
     """Refresh bounded, low-cardinality queue and payment state metrics."""
 
-    from app.models import EmailOutbox, Payment, WebhookDelivery, WorkerHeartbeat
+    from app.models import (
+        EmailOutbox,
+        MpesaCallback,
+        Payment,
+        PaymentAttempt,
+        WebhookDelivery,
+        WebhookEndpoint,
+        WorkerHeartbeat,
+    )
 
     groups = (
         (WEBHOOK_QUEUE, WebhookDelivery),
@@ -85,9 +115,52 @@ def refresh_database_gauges(db) -> None:
             gauge.clear()
             for status, count in rows:
                 gauge.labels(str(status)).set(count)
+        PAYMENTS_PENDING_COUNT.set(
+            db.query(Payment).filter(Payment.status.in_(["created", "pending", "stk_sent"])).count()
+        )
+        PAYMENTS_UNKNOWN_COUNT.set(db.query(Payment).filter(Payment.status == "unknown").count())
         freshest = db.query(func.max(WorkerHeartbeat.last_seen_at)).scalar()
         if freshest:
             WORKER_HEARTBEAT_AGE.set(max(time.time() - freshest.timestamp(), 0))
+        callback_rows = (
+            db.query(MpesaCallback.processing_status, func.count(MpesaCallback.id))
+            .group_by(MpesaCallback.processing_status)
+            .all()
+        )
+        CALLBACKS_STATE.clear()
+        for callback_status, count in callback_rows:
+            CALLBACKS_STATE.labels(str(callback_status)).set(count)
+        RECONCILIATION_BACKLOG.set(
+            db.query(Payment).filter(Payment.status.in_(["stk_sent", "unknown"])).count()
+        )
+        oldest_reconciliation = (
+            db.query(func.min(Payment.created_at))
+            .filter(Payment.status.in_(["stk_sent", "unknown"]))
+            .scalar()
+        )
+        OLDEST_RECONCILIATION_AGE.set(
+            max(time.time() - oldest_reconciliation.timestamp(), 0) if oldest_reconciliation else 0
+        )
+        stale_cutoff = time.time() - settings.STK_SUBMITTING_TIMEOUT_SECONDS
+        STALE_STK_SUBMISSIONS.set(
+            db.query(PaymentAttempt)
+            .filter(
+                PaymentAttempt.status == "submitting",
+                func.extract("epoch", PaymentAttempt.submission_started_at) <= stale_cutoff,
+            )
+            .count()
+        )
+        WEBHOOK_ENDPOINTS_PAUSED.set(
+            db.query(WebhookEndpoint).filter(WebhookEndpoint.status == "paused").count()
+        )
+        oldest_webhook = (
+            db.query(func.min(WebhookDelivery.created_at))
+            .filter(WebhookDelivery.status.in_(["queued", "retry_scheduled", "delivering"]))
+            .scalar()
+        )
+        OLDEST_WEBHOOK_AGE.set(
+            max(time.time() - oldest_webhook.timestamp(), 0) if oldest_webhook else 0
+        )
         pool = getattr(db.get_bind(), "pool", None)
         checkedout = getattr(pool, "checkedout", None)
         if callable(checkedout):
@@ -166,20 +239,40 @@ class RedisRateLimitMiddleware(BaseHTTPMiddleware):
             return hashlib.sha256(value.encode()).hexdigest()[:24]
         return get_client_ip(request)
 
+    @staticmethod
+    def _callback_budget(request: Request) -> tuple[str, int, str]:
+        merchant_id = request.url.path.removeprefix("/api/v1/callbacks/mpesa/").split("/", 1)[0]
+        source_ip = get_client_ip(request)
+        verified_source = settings.MPESA_CALLBACK_VERIFY_MODE == "ip_allowlist" and ip_in_cidrs(
+            source_ip, settings.MPESA_CALLBACK_IP_ALLOWLIST
+        )
+        if verified_source:
+            request_class = "callback_verified"
+            limit = settings.RATE_LIMIT_CALLBACK_VERIFIED_REQUESTS_PER_MINUTE
+        else:
+            # Malformed and unverified traffic share a deliberately small
+            # ingress budget; outcome-specific callback metrics distinguish
+            # malformed payloads after the raw-first durability boundary.
+            request_class = "callback_unverified_or_malformed"
+            limit = settings.RATE_LIMIT_CALLBACK_UNVERIFIED_REQUESTS_PER_MINUTE
+        identity = hashlib.sha256(f"{merchant_id}:{source_ip}".encode()).hexdigest()[:32]
+        return request_class, limit, identity
+
     async def dispatch(self, request: Request, call_next):
         if not settings.RATE_LIMIT_ENABLED or request.url.path in {"/health", "/ready", "/metrics"}:
             return await call_next(request)
         if request.url.path.startswith("/api/v1/auth/"):
             request_class = "auth"
             limit = settings.RATE_LIMIT_AUTH_REQUESTS_PER_MINUTE
+            identity = self._identity(request)
         elif request.url.path.startswith("/api/v1/callbacks/mpesa/"):
-            request_class = "callback"
-            limit = settings.RATE_LIMIT_CALLBACK_REQUESTS_PER_MINUTE
+            request_class, limit, identity = self._callback_budget(request)
         else:
             request_class = "api"
             limit = settings.RATE_LIMIT_REQUESTS_PER_MINUTE
+            identity = self._identity(request)
         window = int(time.time()) // 60
-        key = f"lynxpay:rate:{request_class}:{self._identity(request)}:{window}"
+        key = f"lynxpay:rate:{request_class}:{identity}:{window}"
         try:
             if not self.redis:
                 raise RuntimeError("Redis is unavailable")

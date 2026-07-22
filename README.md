@@ -61,8 +61,6 @@ npm ci
 npm run dev
 ```
 
-The older dependency-free console in `dashboard/` is retained temporarily for internal migration coverage and is not deployed by Docker Compose.
-
 ## Verification
 
 ```bash

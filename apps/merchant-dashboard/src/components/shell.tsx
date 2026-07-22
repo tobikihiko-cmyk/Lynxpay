@@ -9,10 +9,12 @@ import { Icon, type IconName } from "./icons";
 type NavItem = { label: string; href: string; icon: IconName; group: "Operate" | "Configure" | "Platform" };
 const navigation: NavItem[] = [
   { label: "Payments", href: "/payments", icon: "payments", group: "Operate" },
+  { label: "Callbacks", href: "/callbacks", icon: "callbacks", group: "Operate" },
   { label: "Reconciliation", href: "/reconciliation", icon: "reconcile", group: "Operate" },
   { label: "Onboarding", href: "/onboarding", icon: "onboarding", group: "Configure" },
   { label: "API keys", href: "/api-keys", icon: "key", group: "Configure" },
   { label: "Webhooks", href: "/webhooks", icon: "webhook", group: "Configure" },
+  { label: "Team & MFA", href: "/team", icon: "team", group: "Configure" },
   { label: "Audit trail", href: "/audit", icon: "audit", group: "Configure" },
   { label: "Approvals", href: "/admin/merchants", icon: "approval", group: "Platform" }
 ];

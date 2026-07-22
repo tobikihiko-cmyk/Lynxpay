@@ -14,7 +14,6 @@ test-docker:
 lint:
 	ruff check app tests alembic
 	ruff format --check app tests alembic
-	node --check dashboard/app.js
 
 security:
 	ruff check app --select S

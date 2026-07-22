@@ -13,14 +13,14 @@ import socket
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 import httpx
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.security import decrypt_sensitive_value
 from app.models import WebhookDelivery, WebhookDeliveryAttempt, WebhookEndpoint
 from app.observability import WEBHOOK_DELIVERY_OUTCOMES
-from app.service import utcnow
+from app.service import audit, utcnow
 
 
 class UnsafeWebhookUrlError(ValueError):
@@ -138,14 +138,34 @@ def claim_deliveries(db: Session, worker_id: str, limit: int = 20) -> list[str]:
         WebhookDelivery.status == "delivering",
         WebhookDelivery.lease_expires_at <= now,
     )
+    requested = min(max(limit, 1), 100)
+    per_endpoint = max(settings.WEBHOOK_CLAIM_PER_ENDPOINT, 1)
+    ranked = (
+        db.query(
+            WebhookDelivery.id.label("delivery_id"),
+            func.row_number()
+            .over(
+                partition_by=WebhookDelivery.webhook_endpoint_id,
+                order_by=(
+                    WebhookDelivery.next_retry_at.asc(),
+                    WebhookDelivery.created_at.asc(),
+                ),
+            )
+            .label("endpoint_rank"),
+        )
+        .join(WebhookEndpoint, WebhookEndpoint.id == WebhookDelivery.webhook_endpoint_id)
+        .filter(or_(due, expired), WebhookEndpoint.status == "active")
+        .subquery()
+    )
     query = (
         db.query(WebhookDelivery)
-        .filter(or_(due, expired))
+        .join(ranked, ranked.c.delivery_id == WebhookDelivery.id)
+        .filter(ranked.c.endpoint_rank <= per_endpoint)
         .order_by(WebhookDelivery.next_retry_at.asc(), WebhookDelivery.created_at.asc())
-        .limit(min(max(limit, 1), 100))
+        .limit(requested)
     )
     if db.bind and db.bind.dialect.name == "postgresql":
-        query = query.with_for_update(skip_locked=True)
+        query = query.with_for_update(skip_locked=True, of=WebhookDelivery)
     rows = query.all()
     lease_expires_at = now + timedelta(seconds=settings.WEBHOOK_LEASE_SECONDS)
     for delivery in rows:
@@ -200,6 +220,9 @@ async def deliver_claimed(db: Session, delivery_id: str, worker_id: str) -> Webh
             delivery.next_retry_at = None
             delivery.last_error = None
             attempt.status = "delivered"
+            endpoint.consecutive_failures = 0
+            endpoint.pause_reason = None
+            endpoint.paused_at = None
         else:
             delivery.last_error = f"HTTP {status_code}"
             attempt.status = "failed"
@@ -212,7 +235,25 @@ async def deliver_claimed(db: Session, delivery_id: str, worker_id: str) -> Webh
 
     attempt.finished_at = utcnow()
 
-    if delivery.status != "delivered":
+    if attempt.status == "failed" and endpoint and endpoint.status == "active":
+        endpoint.consecutive_failures = (endpoint.consecutive_failures or 0) + 1
+        if endpoint.consecutive_failures >= settings.WEBHOOK_AUTO_PAUSE_FAILURES:
+            endpoint.status = "paused"
+            endpoint.paused_at = utcnow()
+            endpoint.pause_reason = "consecutive_delivery_failures"
+            delivery.status = "dead_letter"
+            delivery.last_error = "Endpoint auto-paused after repeated delivery failures"
+            audit(
+                db,
+                organization_id=endpoint.organization_id,
+                merchant_id=endpoint.merchant_account_id,
+                action="webhook_endpoint_auto_paused",
+                entity_type="webhook_endpoint",
+                entity_id=endpoint.id,
+                metadata={"consecutive_failures": endpoint.consecutive_failures},
+            )
+
+    if delivery.status not in {"delivered", "dead_letter"}:
         if delivery.attempts >= delivery.max_attempts:
             delivery.status = "dead_letter"
             delivery.next_retry_at = None

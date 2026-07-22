@@ -114,6 +114,7 @@ def _issue_tokens(
     request: Request,
     *,
     family_id: str | None = None,
+    mfa_authenticated_at: datetime | None = None,
 ) -> tuple[dict, AuthSession]:
     raw_refresh, prefix, digest = generate_refresh_token()
     ip_address, user_agent = _request_context(request)
@@ -127,6 +128,7 @@ def _issue_tokens(
         expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
         ip_address=ip_address,
         user_agent=user_agent,
+        mfa_authenticated_at=mfa_authenticated_at,
     )
     db.add(session)
     db.flush()
@@ -320,10 +322,20 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
         or not verify_password(payload.password, user.password_hash)
     ):
         raise HTTPException(status_code=401, detail="Invalid email or password")
+    mfa_enabled = bool(
+        db.query(MfaTotpCredential)
+        .filter(MfaTotpCredential.user_id == user.id, MfaTotpCredential.enabled.is_(True))
+        .first()
+    )
     if not _verify_mfa(db, user, payload.mfa_code):
         raise HTTPException(status_code=401, detail="A valid MFA or recovery code is required")
     user.last_login_at = datetime.now(timezone.utc)
-    response, session = _issue_tokens(db, user, request)
+    response, session = _issue_tokens(
+        db,
+        user,
+        request,
+        mfa_authenticated_at=datetime.now(timezone.utc) if mfa_enabled else None,
+    )
     db.add(
         AuditLog(
             organization_id=user.organization_id,
@@ -372,7 +384,13 @@ def refresh(payload: RefreshRequest, request: Request, db: Session = Depends(get
     user = db.query(User).filter(User.id == record.user_id, User.status == "active").first()
     if not user:
         raise HTTPException(status_code=401, detail="User is unavailable")
-    response, replacement = _issue_tokens(db, user, request, family_id=record.family_id)
+    response, replacement = _issue_tokens(
+        db,
+        user,
+        request,
+        family_id=record.family_id,
+        mfa_authenticated_at=record.mfa_authenticated_at,
+    )
     record.status = "rotated"
     record.last_used_at = now
     record.replaced_by_session_id = replacement.id
@@ -553,6 +571,10 @@ def confirm_mfa(
     credential.enabled = True
     credential.confirmed_at = datetime.now(timezone.utc)
     credential.last_used_step = step
+    if principal.session_id:
+        session = db.query(AuthSession).filter(AuthSession.id == principal.session_id).first()
+        if session:
+            session.mfa_authenticated_at = credential.confirmed_at
     audit(
         db,
         organization_id=principal.organization_id,
@@ -650,4 +672,11 @@ def me(principal: Principal = Depends(get_principal), db: Session = Depends(get_
     if not principal.user_id:
         raise HTTPException(status_code=403, detail="User authentication is required")
     user = db.query(User).filter(User.id == principal.user_id).first()
-    return _user_view(user)
+    view = _user_view(user)
+    view["mfa_enabled"] = bool(
+        db.query(MfaTotpCredential)
+        .filter(MfaTotpCredential.user_id == user.id, MfaTotpCredential.enabled.is_(True))
+        .first()
+    )
+    view["mfa_authenticated"] = principal.mfa_authenticated
+    return view

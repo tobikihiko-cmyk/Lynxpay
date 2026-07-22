@@ -19,8 +19,10 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     event,
+    inspect,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Session as OrmSession
 from sqlalchemy.orm import relationship
 
 from app.database import Base
@@ -115,6 +117,7 @@ class AuthSession(Base):
     )
     ip_address = Column(String(45), nullable=True)
     user_agent = Column(String(500), nullable=True)
+    mfa_authenticated_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
 
 
@@ -244,7 +247,7 @@ class TeamInvitation(Base):
         index=True,
     )
     email = Column(String(254), nullable=False, index=True)
-    role = Column(String(30), nullable=False, default="member")
+    role = Column(String(30), nullable=False, default="operator")
     token_hash = Column(String(64), nullable=False, unique=True)
     status = Column(String(20), nullable=False, default="pending")
     invited_by_user_id = Column(
@@ -509,7 +512,13 @@ class PaymentAttempt(TimestampMixin, Base):
     checkout_request_id = Column(String(160), nullable=True)
     response_code = Column(String(30), nullable=True)
     response_description = Column(String(500), nullable=True)
-    status = Column(String(30), nullable=False, default="created")
+    # Submission evidence is intentionally more precise than the payment state.
+    # A worker can recover `submitting` attempts after a process/network failure
+    # without guessing whether the request was ever attempted.
+    status = Column(String(30), nullable=False, default="not_sent", index=True)
+    submission_started_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    provider_responded_at = Column(DateTime(timezone=True), nullable=True)
+    abandoned_at = Column(DateTime(timezone=True), nullable=True)
     attempt_type = Column(String(20), nullable=False, default="initial")
     retry_reason = Column(String(500), nullable=True)
     initiated_by_user_id = Column(
@@ -557,6 +566,11 @@ class MpesaCallback(Base):
     duplicate_of_callback_id = Column(
         String(36), ForeignKey("lynxpay_mpesa_callbacks.id", ondelete="SET NULL"), nullable=True
     )
+    linked_at = Column(DateTime(timezone=True), nullable=True)
+    linked_by_user_id = Column(
+        String(36), ForeignKey("lynxpay_users.id", ondelete="SET NULL"), nullable=True
+    )
+    link_reason = Column(String(500), nullable=True)
     received_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     source_ip = Column(String(45), nullable=True)
 
@@ -612,6 +626,9 @@ class WebhookEndpoint(TimestampMixin, Base):
     secret_encrypted = Column(Text, nullable=False)
     encryption_key_version = Column(String(50), nullable=False, default="legacy")
     status = Column(String(20), nullable=False, default="active")
+    consecutive_failures = Column(Integer, nullable=False, default=0)
+    paused_at = Column(DateTime(timezone=True), nullable=True)
+    pause_reason = Column(String(500), nullable=True)
 
 
 class WebhookDelivery(TimestampMixin, Base):
@@ -745,3 +762,25 @@ def _immutable(_mapper, _connection, target) -> None:
 for _model in (AuditLog, PaymentLedgerEntry):
     event.listen(_model, "before_update", _immutable)
     event.listen(_model, "before_delete", _immutable)
+
+
+@event.listens_for(OrmSession, "before_flush")
+def _require_ledger_for_payment_status_change(session, _flush_context, _instances) -> None:
+    """Reject ORM payment transitions that do not carry ledger evidence."""
+
+    new_ledger_rows = [row for row in session.new if isinstance(row, PaymentLedgerEntry)]
+    for payment in session.dirty:
+        if not isinstance(payment, Payment):
+            continue
+        history = inspect(payment).attrs.status.history
+        if not history.has_changes() or not history.deleted:
+            continue
+        previous = history.deleted[0]
+        has_evidence = any(
+            row.payment_id == payment.id
+            and row.status_from == previous
+            and row.status_to == payment.status
+            for row in new_ledger_rows
+        )
+        if not has_evidence:
+            raise ValueError("Payment status changes require an append-only ledger entry")

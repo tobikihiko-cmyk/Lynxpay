@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlsplit
 from app.core.config import settings
 from app.core.security import decrypt_sensitive_value, encryption_key_version, totp_code
 from app.database import SessionLocal
-from app.models import AuditLog, AuthSession, EmailOutbox, MfaTotpCredential
+from app.models import AuditLog, AuthSession, EmailOutbox, MfaTotpCredential, User
 from app.rotate_encryption import rotate
 
 BASE = "/api/v1"
@@ -233,3 +233,41 @@ def test_rotation_job_includes_mfa_and_encrypted_email_payloads(db, client, monk
     actions = {row.action for row in db.query(AuditLog).all()}
     assert "mfa_secret_encryption_rotated" in actions
     assert "email_payload_encryption_rotated" in actions
+
+
+def test_privileged_control_plane_requires_recent_mfa_when_enabled(
+    db, client, auth_headers, monkeypatch
+):
+    monkeypatch.setattr(settings, "REQUIRE_PRIVILEGED_MFA", True)
+    denied = client.get(f"{BASE}/organization", headers=auth_headers)
+    assert denied.status_code == 403
+    assert "MFA-authenticated" in denied.json()["detail"]
+
+    setup = client.post(f"{BASE}/auth/mfa/setup", headers=auth_headers)
+    assert setup.status_code == 201, setup.text
+    confirmed = client.post(
+        f"{BASE}/auth/mfa/confirm",
+        headers=auth_headers,
+        json={"code": totp_code(setup.json()["secret"])},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert client.get(f"{BASE}/organization", headers=auth_headers).status_code == 200
+
+
+def test_accountant_role_is_read_only_and_cannot_manage_merchants(db, client, auth_headers):
+    user = db.query(User).one()
+    user.role = "accountant"
+    db.commit()
+    assert client.get(f"{BASE}/payments", headers=auth_headers).status_code == 200
+    assert client.get(f"{BASE}/callbacks", headers=auth_headers).status_code == 403
+    denied = client.post(
+        f"{BASE}/merchants",
+        headers=auth_headers,
+        json={
+            "merchant_name": "Forbidden merchant",
+            "shortcode": "888999",
+            "shortcode_type": "paybill",
+            "environment": "sandbox",
+        },
+    )
+    assert denied.status_code == 403

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.datetime_utils import ensure_utc_datetime
 from app.core.deps import get_db
 from app.core.security import decode_token
@@ -26,6 +27,78 @@ class Principal:
     scopes: frozenset[str] = frozenset()
     is_control_plane_admin: bool = False
     is_platform_admin: bool = False
+    role: str | None = None
+    session_id: str | None = None
+    mfa_authenticated: bool = False
+
+
+ROLE_SCOPES: dict[str, frozenset[str]] = {
+    "owner": frozenset(
+        {
+            "merchants:read",
+            "payments:read",
+            "payments:write",
+            "callbacks:read",
+            "callbacks:read_raw",
+            "webhooks:read",
+            "webhooks:write",
+            "audit:read",
+        }
+    ),
+    "admin": frozenset(
+        {
+            "merchants:read",
+            "payments:read",
+            "payments:write",
+            "callbacks:read",
+            "callbacks:read_raw",
+            "webhooks:read",
+            "webhooks:write",
+            "audit:read",
+        }
+    ),
+    "operator": frozenset(
+        {
+            "merchants:read",
+            "payments:read",
+            "payments:write",
+            "callbacks:read",
+            "webhooks:read",
+            "audit:read",
+        }
+    ),
+    "member": frozenset({"merchants:read", "payments:read", "callbacks:read"}),
+    "developer": frozenset(
+        {
+            "merchants:read",
+            "payments:read",
+            "payments:write",
+            "callbacks:read",
+            "webhooks:read",
+            "webhooks:write",
+        }
+    ),
+    "support": frozenset(
+        {
+            "merchants:read",
+            "payments:read",
+            "callbacks:read",
+            "callbacks:read_raw",
+            "webhooks:read",
+            "audit:read",
+        }
+    ),
+    "accountant": frozenset({"merchants:read", "payments:read", "audit:read"}),
+    "read_only": frozenset(
+        {
+            "merchants:read",
+            "payments:read",
+            "callbacks:read",
+            "webhooks:read",
+            "audit:read",
+        }
+    ),
+}
 
 
 def _unauthorized() -> HTTPException:
@@ -88,13 +161,21 @@ def get_principal(request: Request, db: Session = Depends(get_db)) -> Principal:
     user = db.query(User).filter(User.id == user_id, User.status == "active").first()
     if not user:
         raise _unauthorized()
+    mfa_authenticated = bool(
+        session.mfa_authenticated_at
+        and ensure_utc_datetime(session.mfa_authenticated_at)
+        >= datetime.now(timezone.utc) - timedelta(minutes=settings.MFA_PRIVILEGED_MAX_AGE_MINUTES)
+    )
     set_tenant_context(db, user.organization_id)
     return Principal(
         organization_id=user.organization_id,
         user_id=user.id,
-        scopes=frozenset({"*"}),
+        scopes=ROLE_SCOPES.get(user.role, frozenset()),
         is_control_plane_admin=user.role in {"owner", "admin"},
         is_platform_admin=bool(user.is_platform_admin),
+        role=user.role,
+        session_id=session.id,
+        mfa_authenticated=mfa_authenticated,
     )
 
 
@@ -117,6 +198,7 @@ def require_control_admin(principal: Principal = Depends(get_principal)) -> Prin
         raise HTTPException(
             status_code=403, detail="Control-plane administrator access is required"
         )
+    ensure_privileged_mfa(principal)
     return principal
 
 
@@ -125,7 +207,18 @@ def require_platform_admin(principal: Principal = Depends(get_principal)) -> Pri
         raise HTTPException(
             status_code=403, detail="LynxPay platform administrator access is required"
         )
+    ensure_privileged_mfa(principal)
     return principal
+
+
+def ensure_privileged_mfa(principal: Principal) -> None:
+    if settings.REQUIRE_PRIVILEGED_MFA and (
+        not principal.user_id or not principal.mfa_authenticated
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="A recent MFA-authenticated session is required for this operation",
+        )
 
 
 def scoped_merchant(db: Session, principal: Principal, merchant_id: str) -> MerchantAccount:

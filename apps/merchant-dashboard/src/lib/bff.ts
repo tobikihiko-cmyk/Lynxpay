@@ -1,15 +1,17 @@
 import { cookies, headers } from "next/headers";
 import { NextResponse } from "next/server";
+import { mutationIsSameOrigin } from "./request-security";
 
 const apiBase = process.env.LYNXPAY_API_URL || "http://api:8000";
 const secure = process.env.NODE_ENV === "production";
-const cookieOptions = { httpOnly: true, secure, sameSite: "lax" as const, path: "/" };
+const cookieOptions = { httpOnly: true, secure, sameSite: "strict" as const, path: "/" };
 
 export async function requireSameOrigin(): Promise<void> {
   const incoming = await headers();
   const origin = incoming.get("origin");
   const host = incoming.get("host");
-  if (origin && host && new URL(origin).host !== host) throw new Error("Cross-origin mutation rejected");
+  const fetchSite = incoming.get("sec-fetch-site");
+  if (!mutationIsSameOrigin({ origin, host, fetchSite })) throw new Error("Cross-origin mutation rejected");
 }
 
 export function setSession(response: NextResponse, payload: Record<string, unknown>) {

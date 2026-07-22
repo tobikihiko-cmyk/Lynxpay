@@ -1,0 +1,121 @@
+services:
+  postgres:
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-lynxpay}
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?set POSTGRES_ADMIN_PASSWORD}
+
+  role-provision:
+    image: postgres:16-alpine
+    environment:
+      PGPASSWORD: ${POSTGRES_ADMIN_PASSWORD:?set POSTGRES_ADMIN_PASSWORD}
+    volumes:
+      - ./ops:/ops:ro
+    command:
+      - sh
+      - -ec
+      - >-
+        psql -h postgres -U postgres -d ${POSTGRES_DB:-lynxpay}
+        -v database_name=${POSTGRES_DB:-lynxpay}
+        -v migrator_password=${LYNXPAY_MIGRATOR_DB_PASSWORD:?set LYNXPAY_MIGRATOR_DB_PASSWORD}
+        -v api_password=${LYNXPAY_API_DB_PASSWORD:?set LYNXPAY_API_DB_PASSWORD}
+        -v worker_password=${LYNXPAY_WORKER_DB_PASSWORD:?set LYNXPAY_WORKER_DB_PASSWORD}
+        -v admin_password=${LYNXPAY_ADMIN_DB_PASSWORD:?set LYNXPAY_ADMIN_DB_PASSWORD}
+        -v metrics_password=${LYNXPAY_METRICS_DB_PASSWORD:?set LYNXPAY_METRICS_DB_PASSWORD}
+        -v readonly_password=${LYNXPAY_READONLY_DB_PASSWORD:?set LYNXPAY_READONLY_DB_PASSWORD}
+        -f /ops/provision-postgres-roles.sql
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  migrate:
+    environment:
+      DATABASE_URL: postgresql://lynxpay_migrator:${LYNXPAY_MIGRATOR_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-lynxpay}
+    depends_on:
+      role-provision:
+        condition: service_completed_successfully
+
+  role-grants:
+    image: postgres:16-alpine
+    environment:
+      PGPASSWORD: ${LYNXPAY_MIGRATOR_DB_PASSWORD:?set LYNXPAY_MIGRATOR_DB_PASSWORD}
+    volumes:
+      - ./ops:/ops:ro
+    command:
+      - sh
+      - -ec
+      - >-
+        psql -h postgres -U lynxpay_migrator -d ${POSTGRES_DB:-lynxpay}
+        -f /ops/apply-runtime-grants.sql
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  api:
+    environment:
+      ENVIRONMENT: production
+      PROCESS_TYPE: api
+      DATABASE_URL: postgresql://lynxpay_api:${LYNXPAY_API_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-lynxpay}
+      ADMIN_DATABASE_URL: postgresql://lynxpay_admin:${LYNXPAY_ADMIN_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-lynxpay}
+      METRICS_DATABASE_URL: postgresql://lynxpay_metrics:${LYNXPAY_METRICS_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-lynxpay}
+      RATE_LIMIT_ENABLED: "true"
+    depends_on:
+      role-grants:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  worker:
+    profiles: ["combined-worker-disabled"]
+
+  webhook-worker: &worker
+    build: .
+    command: ["python", "-m", "app.worker", "--mode", "webhooks"]
+    env_file: ${LYNXPAY_ENV_FILE:-.env}
+    environment:
+      ENVIRONMENT: production
+      PROCESS_TYPE: worker
+      DATABASE_URL: postgresql://lynxpay_worker:${LYNXPAY_WORKER_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-lynxpay}
+      WORKER_DATABASE_URL: postgresql://lynxpay_worker:${LYNXPAY_WORKER_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-lynxpay}
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.worker", "--mode", "webhooks", "--health-check"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    depends_on:
+      role-grants:
+        condition: service_completed_successfully
+
+  reconciliation-worker:
+    <<: *worker
+    command: ["python", "-m", "app.worker", "--mode", "reconciliation"]
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.worker", "--mode", "reconciliation", "--health-check"]
+
+  email-worker:
+    <<: *worker
+    command: ["python", "-m", "app.worker", "--mode", "email"]
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.worker", "--mode", "email", "--health-check"]
+
+  maintenance-worker:
+    <<: *worker
+    command: ["python", "-m", "app.worker", "--mode", "maintenance"]
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.worker", "--mode", "maintenance", "--health-check"]
+
+  dashboard:
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s

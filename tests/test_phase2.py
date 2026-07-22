@@ -11,11 +11,13 @@ import pytest
 from app.core.config import settings
 from app.core.security import (
     decrypt_sensitive_value,
+    decrypt_sensitive_values,
     encrypt_sensitive_value,
+    encrypt_sensitive_values,
     encryption_key_version,
     reencrypt_sensitive_value,
 )
-from app.daraja import DarajaClient, DarajaSecrets
+from app.daraja import DarajaClient, DarajaSecrets, clear_daraja_token_cache
 from app.models import (
     AuditLog,
     MerchantAccount,
@@ -29,7 +31,7 @@ from app.models import (
     WebhookEndpoint,
 )
 from app.reconciliation import reconcile_payment
-from app.service import utcnow
+from app.service import transition_and_record, utcnow
 from app.webhooks import (
     UnsafeWebhookUrlError,
     claim_deliveries,
@@ -192,6 +194,60 @@ def test_aws_kms_provider_wraps_only_data_keys(monkeypatch):
     }
 
 
+def test_daraja_credential_bundle_uses_one_kms_wrap_and_unwrap(monkeypatch):
+    calls = []
+
+    class FakeKms:
+        def encrypt(self, **kwargs):
+            calls.append("encrypt")
+            return {"CiphertextBlob": b"kms:" + kwargs["Plaintext"]}
+
+        def decrypt(self, **kwargs):
+            calls.append("decrypt")
+            return {"Plaintext": kwargs["CiphertextBlob"].removeprefix(b"kms:")}
+
+    monkeypatch.setitem(sys.modules, "boto3", SimpleNamespace(client=lambda *_a, **_k: FakeKms()))
+    monkeypatch.setattr(settings, "ENCRYPTION_PROVIDER", "aws_kms")
+    monkeypatch.setattr(settings, "ENCRYPTION_ACTIVE_KEY_ID", "kms-bundle-v2")
+    monkeypatch.setattr(
+        settings,
+        "ENCRYPTION_KMS_KEY_IDS_JSON",
+        '{"kms-bundle-v2":"arn:aws:kms:af-south-1:123:key/bundle-test"}',
+    )
+    encrypted = encrypt_sensitive_values(["consumer", "secret", "passkey", None])
+    assert calls == ["encrypt"]
+    assert decrypt_sensitive_values(encrypted) == ["consumer", "secret", "passkey", None]
+    assert calls == ["encrypt", "decrypt"]
+
+
+@pytest.mark.asyncio
+async def test_daraja_oauth_cache_single_flights_concurrent_requests(monkeypatch):
+    clear_daraja_token_cache()
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"access_token": "cached-oauth-token", "expires_in": "3599"}
+
+    class HttpClient:
+        calls = 0
+
+        async def get(self, *_args, **_kwargs):
+            self.calls += 1
+            await asyncio.sleep(0)
+            return Response()
+
+    http = HttpClient()
+    monkeypatch.setattr("app.daraja._shared_http_client", lambda _base_url: http)
+    client = DarajaClient("sandbox")
+    secrets = DarajaSecrets("cache-consumer", "cache-secret", "passkey")
+    tokens = await asyncio.gather(*(client.get_access_token(secrets) for _ in range(10)))
+    assert tokens == ["cached-oauth-token"] * 10
+    assert http.calls == 1
+
+
 def test_webhook_signature_is_deterministic_and_body_bound():
     first = sign_payload("whsec_test", 1234, b'{"event":"payment.success"}')
     second = sign_payload("whsec_test", 1234, b'{"event":"payment.failed"}')
@@ -249,6 +305,7 @@ async def test_daraja_status_query_contract_redacts_nothing_into_response():
 
 @pytest.mark.asyncio
 async def test_webhook_retry_then_dead_letters(db, merchant, monkeypatch):
+    monkeypatch.setattr(settings, "WEBHOOK_AUTO_PAUSE_FAILURES", 2)
     merchant_row = db.query(MerchantAccount).filter(MerchantAccount.id == merchant["id"]).one()
     endpoint = WebhookEndpoint(
         organization_id=merchant_row.organization_id,
@@ -295,6 +352,54 @@ async def test_webhook_retry_then_dead_letters(db, merchant, monkeypatch):
     )
     assert [attempt.status for attempt in attempts] == ["failed", "failed"]
     assert [attempt.response_status_code for attempt in attempts] == [503, 503]
+    db.refresh(endpoint)
+    assert endpoint.status == "paused"
+    assert endpoint.pause_reason == "consecutive_delivery_failures"
+    assert db.query(AuditLog).filter_by(action="webhook_endpoint_auto_paused").count() == 1
+
+
+def test_webhook_claims_are_fair_across_endpoints(db, merchant, monkeypatch):
+    monkeypatch.setattr(settings, "WEBHOOK_CLAIM_PER_ENDPOINT", 2)
+    merchant_row = db.query(MerchantAccount).filter(MerchantAccount.id == merchant["id"]).one()
+    endpoints = []
+    for suffix in ("busy", "quiet"):
+        endpoint = WebhookEndpoint(
+            organization_id=merchant_row.organization_id,
+            merchant_account_id=merchant_row.id,
+            url=f"https://{suffix}.example.test/events",
+            event_types=["payment.success"],
+            secret_encrypted=encrypt_sensitive_value(f"whsec_{suffix}"),
+            encryption_key_version=settings.ENCRYPTION_ACTIVE_KEY_ID,
+            status="active",
+        )
+        db.add(endpoint)
+        endpoints.append(endpoint)
+    db.flush()
+    for index in range(10):
+        db.add(
+            WebhookDelivery(
+                webhook_endpoint_id=endpoints[0].id,
+                event_type="payment.success",
+                payload={"index": index},
+                status="queued",
+                next_retry_at=utcnow() - timedelta(seconds=20 - index),
+            )
+        )
+    quiet = WebhookDelivery(
+        webhook_endpoint_id=endpoints[1].id,
+        event_type="payment.success",
+        payload={"quiet": True},
+        status="queued",
+        next_retry_at=utcnow() - timedelta(seconds=1),
+    )
+    db.add(quiet)
+    db.commit()
+
+    claimed = claim_deliveries(db, "fair-worker", limit=3)
+    rows = db.query(WebhookDelivery).filter(WebhookDelivery.id.in_(claimed)).all()
+    assert len(claimed) == 3
+    assert {row.webhook_endpoint_id for row in rows} == {endpoints[0].id, endpoints[1].id}
+    assert quiet.id in claimed
 
 
 @pytest.mark.asyncio
@@ -342,7 +447,13 @@ def test_callback_enriches_receipt_after_reconciled_success(
     db, client, merchant, stk_payment, monkeypatch
 ):
     payment = db.query(Payment).filter_by(id=stk_payment["id"]).one()
-    payment.status = "success"
+    transition_and_record(
+        db,
+        payment=payment,
+        target="success",
+        event_type="payment.success",
+        details={"source": "test_status_query"},
+    )
     payment.result_code = "0"
     payment.paid_at = utcnow()
     db.commit()
