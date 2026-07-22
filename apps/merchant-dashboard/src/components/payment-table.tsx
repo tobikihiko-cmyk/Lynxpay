@@ -7,6 +7,8 @@ export type Payment = {
   id: string;
   merchant_id?: string;
   external_reference: string;
+  invoice_id?: string | null;
+  purpose?: string;
   amount: string;
   currency?: string;
   customer_name?: string;

@@ -1,9 +1,10 @@
 import type { SVGProps } from "react";
 
-export type IconName = "payments" | "callbacks" | "reconcile" | "onboarding" | "key" | "webhook" | "team" | "audit" | "approval" | "search" | "bell" | "menu" | "close" | "arrow" | "shield" | "check" | "clock" | "review" | "refresh";
+export type IconName = "payments" | "invoices" | "callbacks" | "reconcile" | "onboarding" | "key" | "webhook" | "team" | "audit" | "approval" | "search" | "bell" | "menu" | "close" | "arrow" | "shield" | "check" | "clock" | "review" | "refresh";
 
 const paths: Record<IconName, React.ReactNode> = {
   payments: <><path d="M3 7.5h18M6 4h12a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3Z"/><path d="M7 15h3"/></>,
+  invoices: <><path d="M7 3h10a2 2 0 0 1 2 2v16l-3-2-3 2-3-2-3 2-3-2V5a2 2 0 0 1 2-2Z"/><path d="M8 8h8M8 12h8M8 16h5"/></>,
   callbacks: <><path d="M5 5h14v10H8l-3 3z"/><path d="M9 9h6M9 12h4"/></>,
   reconcile: <><path d="M20 7h-7a4 4 0 0 0-4 4v1"/><path d="m17 4 3 3-3 3M4 17h7a4 4 0 0 0 4-4v-1"/><path d="m7 20-3-3 3-3"/></>,
   onboarding: <><path d="M12 3v18M3 12h18"/><circle cx="12" cy="12" r="9"/></>,

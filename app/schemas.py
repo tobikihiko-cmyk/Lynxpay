@@ -181,6 +181,122 @@ class StkPushCreate(BaseModel):
         return self
 
 
+class CatalogItemCreate(BaseModel):
+    merchant_id: str
+    item_type: Literal["service", "product"]
+    name: str = Field(min_length=2, max_length=160)
+    description: str | None = Field(None, max_length=500)
+    unit_price: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
+    sku: str | None = Field(None, max_length=80)
+    sort_order: int = Field(0, ge=0, le=999)
+
+    @field_validator("unit_price")
+    @classmethod
+    def require_whole_shillings(cls, value: Decimal) -> Decimal:
+        if value != value.to_integral_value():
+            raise ValueError("M-PESA catalog prices must be whole KES")
+        return value.quantize(Decimal("0.01"))
+
+
+class CatalogItemPatch(BaseModel):
+    item_type: Literal["service", "product"] | None = None
+    name: str | None = Field(None, min_length=2, max_length=160)
+    description: str | None = Field(None, max_length=500)
+    unit_price: Decimal | None = Field(None, gt=0, max_digits=12, decimal_places=2)
+    sku: str | None = Field(None, max_length=80)
+    sort_order: int | None = Field(None, ge=0, le=999)
+    status: Literal["active", "archived"] | None = None
+
+    @field_validator("unit_price")
+    @classmethod
+    def require_whole_shillings(cls, value: Decimal | None) -> Decimal | None:
+        if value is None:
+            return None
+        if value != value.to_integral_value():
+            raise ValueError("M-PESA catalog prices must be whole KES")
+        return value.quantize(Decimal("0.01"))
+
+    @model_validator(mode="after")
+    def require_change(self):
+        if not self.model_fields_set:
+            raise ValueError("at least one catalog field is required")
+        return self
+
+
+class InvoiceLineItemCreate(BaseModel):
+    catalog_item_id: str | None = None
+    item_type: Literal["service", "product", "custom"] | None = None
+    name: str | None = Field(None, min_length=2, max_length=160)
+    description: str | None = Field(None, max_length=500)
+    quantity: Decimal = Field(Decimal("1.00"), gt=0, max_digits=10, decimal_places=2)
+    unit_price: Decimal | None = Field(None, gt=0, max_digits=12, decimal_places=2)
+
+    @field_validator("quantity")
+    @classmethod
+    def normalize_quantity(cls, value: Decimal) -> Decimal:
+        return value.quantize(Decimal("0.01"))
+
+    @field_validator("unit_price")
+    @classmethod
+    def require_whole_shillings(cls, value: Decimal | None) -> Decimal | None:
+        if value is None:
+            return None
+        if value != value.to_integral_value():
+            raise ValueError("M-PESA invoice line prices must be whole KES")
+        return value.quantize(Decimal("0.01"))
+
+    @model_validator(mode="after")
+    def require_catalog_or_custom_values(self):
+        if self.catalog_item_id:
+            return self
+        if not self.item_type or not self.name or self.unit_price is None:
+            raise ValueError("custom invoice lines require item_type, name, and unit_price")
+        return self
+
+
+class InvoiceCreate(BaseModel):
+    merchant_id: str
+    invoice_number: str | None = Field(None, min_length=1, max_length=80)
+    client_name: str = Field(min_length=2, max_length=200)
+    client_phone: str | None = None
+    client_email: EmailStr | None = None
+    service_title: str = Field(min_length=2, max_length=160)
+    description: str = Field(min_length=2, max_length=2000)
+    amount: Decimal | None = Field(None, gt=0, max_digits=12, decimal_places=2)
+    line_items: list[InvoiceLineItemCreate] = Field(default_factory=list, max_length=20)
+    due_at: datetime | None = None
+    memo: str | None = Field(None, max_length=2000)
+
+    @field_validator("client_phone")
+    @classmethod
+    def normalize_client_phone(cls, value: str | None) -> str | None:
+        return normalize_kenyan_phone(value) if value else None
+
+    @field_validator("amount")
+    @classmethod
+    def require_whole_shillings(cls, value: Decimal | None) -> Decimal | None:
+        if value is None:
+            return None
+        if value != value.to_integral_value():
+            raise ValueError("M-PESA invoice amount must be a whole number of KES")
+        return value.quantize(Decimal("0.01"))
+
+    @model_validator(mode="after")
+    def require_amount_or_lines(self):
+        if not self.line_items and self.amount is None:
+            raise ValueError("invoice requires either amount or line_items")
+        return self
+
+
+class InvoicePayRequest(BaseModel):
+    phone_number: str
+
+    @field_validator("phone_number")
+    @classmethod
+    def normalize_phone(cls, value: str) -> str:
+        return normalize_kenyan_phone(value)
+
+
 class PaymentRetryRequest(BaseModel):
     reason: str = Field(min_length=8, max_length=500)
     allow_uncertain: bool = False

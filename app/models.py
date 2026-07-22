@@ -483,6 +483,144 @@ class Payment(TimestampMixin, Base):
     )
 
 
+class Invoice(TimestampMixin, Base):
+    __tablename__ = "lynxpay_invoices"
+    __table_args__ = (
+        UniqueConstraint(
+            "merchant_account_id", "invoice_number", name="uq_lynxpay_merchant_invoice_number"
+        ),
+        UniqueConstraint("public_id", name="uq_lynxpay_invoice_public_id"),
+        CheckConstraint("amount > 0", name="ck_lynxpay_invoice_amount_positive"),
+        CheckConstraint("currency = 'KES'", name="ck_lynxpay_invoice_currency_kes"),
+        CheckConstraint(
+            "status IN ('draft','sent','paid','void','expired')",
+            name="ck_lynxpay_invoice_status",
+        ),
+    )
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    organization_id = Column(
+        String(36),
+        ForeignKey("lynxpay_organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    merchant_account_id = Column(
+        String(36),
+        ForeignKey("lynxpay_merchant_accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    invoice_number = Column(String(80), nullable=False)
+    public_id = Column(String(80), nullable=False, index=True)
+    client_name = Column(String(200), nullable=False)
+    client_phone = Column(String(15), nullable=True)
+    client_email = Column(String(254), nullable=True)
+    service_title = Column(String(160), nullable=False)
+    description = Column(Text, nullable=False)
+    amount = Column(Numeric(12, 2), nullable=False)
+    currency = Column(String(3), nullable=False, default="KES")
+    status = Column(String(20), nullable=False, default="sent", index=True)
+    due_at = Column(DateTime(timezone=True), nullable=True)
+    sent_at = Column(DateTime(timezone=True), nullable=True)
+    paid_at = Column(DateTime(timezone=True), nullable=True)
+    voided_at = Column(DateTime(timezone=True), nullable=True)
+    payment_id = Column(
+        String(36), ForeignKey("lynxpay_payments.id", ondelete="SET NULL"), nullable=True
+    )
+    merchant_display_name = Column(String(200), nullable=False)
+    merchant_display_address = Column(String(300), nullable=True)
+    merchant_display_email = Column(String(254), nullable=True)
+    merchant_display_phone = Column(String(20), nullable=True)
+    memo = Column(Text, nullable=True)
+
+    merchant = relationship("MerchantAccount")
+    payment = relationship("Payment", foreign_keys=[payment_id])
+    line_items = relationship(
+        "InvoiceLineItem",
+        back_populates="invoice",
+        cascade="all, delete-orphan",
+        order_by="InvoiceLineItem.position",
+    )
+
+
+class CatalogItem(TimestampMixin, Base):
+    __tablename__ = "lynxpay_catalog_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "merchant_account_id", "name", name="uq_lynxpay_merchant_catalog_item_name"
+        ),
+        CheckConstraint("item_type IN ('service','product')", name="ck_lynxpay_catalog_item_type"),
+        CheckConstraint("unit_price > 0", name="ck_lynxpay_catalog_item_price_positive"),
+        CheckConstraint("currency = 'KES'", name="ck_lynxpay_catalog_item_currency_kes"),
+        CheckConstraint("status IN ('active','archived')", name="ck_lynxpay_catalog_item_status"),
+        Index(
+            "ix_lynxpay_catalog_merchant_status_sort",
+            "merchant_account_id",
+            "status",
+            "sort_order",
+        ),
+    )
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    organization_id = Column(
+        String(36),
+        ForeignKey("lynxpay_organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    merchant_account_id = Column(
+        String(36),
+        ForeignKey("lynxpay_merchant_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    item_type = Column(String(20), nullable=False)
+    name = Column(String(160), nullable=False)
+    description = Column(String(500), nullable=True)
+    unit_price = Column(Numeric(12, 2), nullable=False)
+    currency = Column(String(3), nullable=False, default="KES")
+    sku = Column(String(80), nullable=True)
+    status = Column(String(20), nullable=False, default="active", index=True)
+    sort_order = Column(Integer, nullable=False, default=0)
+
+    merchant = relationship("MerchantAccount")
+
+
+class InvoiceLineItem(Base):
+    __tablename__ = "lynxpay_invoice_line_items"
+    __table_args__ = (
+        CheckConstraint(
+            "item_type IN ('service','product','custom')",
+            name="ck_lynxpay_invoice_line_item_type",
+        ),
+        CheckConstraint("quantity > 0", name="ck_lynxpay_invoice_line_quantity_positive"),
+        CheckConstraint("unit_price > 0", name="ck_lynxpay_invoice_line_price_positive"),
+        CheckConstraint("line_total > 0", name="ck_lynxpay_invoice_line_total_positive"),
+    )
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    invoice_id = Column(
+        String(36),
+        ForeignKey("lynxpay_invoices.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    catalog_item_id = Column(
+        String(36), ForeignKey("lynxpay_catalog_items.id", ondelete="SET NULL"), nullable=True
+    )
+    position = Column(Integer, nullable=False, default=0)
+    item_type = Column(String(20), nullable=False)
+    name = Column(String(160), nullable=False)
+    description = Column(String(500), nullable=True)
+    quantity = Column(Numeric(10, 2), nullable=False, default=1)
+    unit_price = Column(Numeric(12, 2), nullable=False)
+    line_total = Column(Numeric(12, 2), nullable=False)
+
+    invoice = relationship("Invoice", back_populates="line_items")
+    catalog_item = relationship("CatalogItem")
+
+
 class PaymentAttempt(TimestampMixin, Base):
     __tablename__ = "lynxpay_payment_attempts"
     __table_args__ = (

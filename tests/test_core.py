@@ -12,6 +12,7 @@ from app.models import (
     ApiKey,
     AuditLog,
     DarajaCredential,
+    Invoice,
     MerchantAccount,
     MpesaCallback,
     Organization,
@@ -193,7 +194,9 @@ def stk_payment(client, api_headers, merchant):
     return response.json()
 
 
-def _success_callback(checkout_id="ws_CO_LYNXPAY_100", receipt="SLP100ABC", amount=100):
+def _success_callback(
+    checkout_id="ws_CO_LYNXPAY_100", receipt="SLP100ABC", amount=100, phone=254712345678
+):
     return {
         "Body": {
             "stkCallback": {
@@ -206,7 +209,7 @@ def _success_callback(checkout_id="ws_CO_LYNXPAY_100", receipt="SLP100ABC", amou
                         {"Name": "Amount", "Value": amount},
                         {"Name": "MpesaReceiptNumber", "Value": receipt},
                         {"Name": "TransactionDate", "Value": 20260715120000},
-                        {"Name": "PhoneNumber", "Value": 254712345678},
+                        {"Name": "PhoneNumber", "Value": phone},
                     ]
                 },
             }
@@ -225,6 +228,167 @@ def _failure_callback(checkout_id="ws_CO_LYNXPAY_100"):
             }
         }
     }
+
+
+def test_invoice_link_collects_payment_and_marks_invoice_paid(
+    db, client, auth_headers, merchant, credential, monkeypatch
+):
+    created = client.post(
+        f"{BASE}/invoices",
+        headers=auth_headers,
+        json={
+            "merchant_id": merchant["id"],
+            "invoice_number": "LAW-2026-001",
+            "client_name": "Jane Wanjiku",
+            "client_phone": "0712345678",
+            "service_title": "Legal consultation and filing",
+            "description": "Preparation of client advisory and filing documents.",
+            "amount": "1500.00",
+        },
+    )
+    assert created.status_code == 201, created.text
+    invoice = created.json()
+    assert invoice["status"] == "sent"
+    assert invoice["payment_link"].endswith(f"/pay/{invoice['public_id']}")
+
+    public_invoice = client.get(f"{BASE}/public/invoices/{invoice['public_id']}")
+    assert public_invoice.status_code == 200
+    assert public_invoice.json()["merchant"]["name"] == "Acme Kenya Limited"
+    assert public_invoice.json()["merchant"]["shortcode"] == "123456"
+
+    with patch(
+        "app.router.DarajaClient.stk_push",
+        new=AsyncMock(
+            return_value=(
+                {
+                    "ResponseCode": "0",
+                    "MerchantRequestID": "MR-INVOICE-001",
+                    "CheckoutRequestID": "ws_CO_INVOICE_001",
+                    "ResponseDescription": "Success. Request accepted for processing",
+                },
+                {
+                    "Password": "generated",
+                    "PhoneNumber": "254722111222",
+                    "PartyA": "254722111222",
+                    "Amount": 1500,
+                    "AccountReference": "LAW-2026-001-1",
+                },
+            )
+        ),
+    ):
+        paid = client.post(
+            f"{BASE}/public/invoices/{invoice['public_id']}/pay",
+            json={"phone_number": "0722 111 222"},
+        )
+    assert paid.status_code == 201, paid.text
+    payment = db.query(Payment).filter(Payment.invoice_id == invoice["id"]).one()
+    assert payment.status == "stk_sent"
+    assert payment.external_reference == "LAW-2026-001-1"
+    assert payment.customer_phone == "254722111222"
+
+    duplicate_prompt = client.post(
+        f"{BASE}/public/invoices/{invoice['public_id']}/pay",
+        json={"phone_number": "0722 111 222"},
+    )
+    assert duplicate_prompt.status_code == 409
+
+    monkeypatch.setattr(settings, "MPESA_CALLBACK_IP_ALLOWLIST", "")
+    callback = client.post(
+        f"{BASE}/callbacks/mpesa/{merchant['id']}",
+        json=_success_callback(
+            checkout_id="ws_CO_INVOICE_001",
+            receipt="INVOICE-RECEIPT-1",
+            amount=1500,
+            phone=254722111222,
+        ),
+    )
+    assert callback.status_code == 200
+    db.expire_all()
+    stored_invoice = db.query(Invoice).filter(Invoice.id == invoice["id"]).one()
+    assert stored_invoice.status == "paid"
+    assert stored_invoice.payment_id == payment.id
+    assert stored_invoice.paid_at is not None
+
+
+def test_catalog_items_can_build_itemized_invoice(client, auth_headers, merchant, credential):
+    consultation = client.post(
+        f"{BASE}/catalog-items",
+        headers=auth_headers,
+        json={
+            "merchant_id": merchant["id"],
+            "item_type": "service",
+            "name": "Legal consultation",
+            "description": "Client advisory session",
+            "unit_price": "5000.00",
+        },
+    )
+    filing = client.post(
+        f"{BASE}/catalog-items",
+        headers=auth_headers,
+        json={
+            "merchant_id": merchant["id"],
+            "item_type": "service",
+            "name": "Court filing support",
+            "unit_price": "2500.00",
+        },
+    )
+    assert consultation.status_code == 201, consultation.text
+    assert filing.status_code == 201, filing.text
+
+    invoice = client.post(
+        f"{BASE}/invoices",
+        headers=auth_headers,
+        json={
+            "merchant_id": merchant["id"],
+            "invoice_number": "LAW-ITEMIZED-001",
+            "client_name": "Jane Wanjiku",
+            "service_title": "Legal consultation and filing",
+            "description": "Legal services prepared for the client.",
+            "line_items": [
+                {"catalog_item_id": consultation.json()["id"], "quantity": "1"},
+                {"catalog_item_id": filing.json()["id"], "quantity": "2"},
+            ],
+        },
+    )
+
+    assert invoice.status_code == 201, invoice.text
+    payload = invoice.json()
+    assert payload["amount"] == "10000.00"
+    assert [item["name"] for item in payload["line_items"]] == [
+        "Legal consultation",
+        "Court filing support",
+    ]
+    public_invoice = client.get(f"{BASE}/public/invoices/{payload['public_id']}")
+    assert public_invoice.status_code == 200
+    assert public_invoice.json()["line_items"][1]["line_total"] == "5000.00"
+
+
+def test_catalog_is_limited_to_twenty_active_items(client, auth_headers, merchant, credential):
+    for index in range(20):
+        response = client.post(
+            f"{BASE}/catalog-items",
+            headers=auth_headers,
+            json={
+                "merchant_id": merchant["id"],
+                "item_type": "service",
+                "name": f"Service {index}",
+                "unit_price": "100.00",
+            },
+        )
+        assert response.status_code == 201, response.text
+
+    rejected = client.post(
+        f"{BASE}/catalog-items",
+        headers=auth_headers,
+        json={
+            "merchant_id": merchant["id"],
+            "item_type": "product",
+            "name": "Extra product",
+            "unit_price": "100.00",
+        },
+    )
+    assert rejected.status_code == 409
+    assert "20 active" in rejected.json()["detail"]
 
 
 def test_merchant_creation_is_tenant_owned_and_audited(db, merchant):

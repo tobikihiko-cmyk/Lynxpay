@@ -20,6 +20,7 @@ from app.deps import Principal
 from app.models import (
     AuditLog,
     DarajaCredential,
+    Invoice,
     MerchantAccount,
     MpesaCallback,
     Payment,
@@ -103,6 +104,20 @@ def transition_and_record(
 ) -> None:
     previous = transition_payment(payment, target)
     ledger(db, payment=payment, event_type=event_type, status_from=previous, details=details)
+    if target == "success" and payment.invoice_id:
+        invoice = (
+            db.query(Invoice)
+            .filter(
+                Invoice.id == payment.invoice_id,
+                Invoice.organization_id == payment.organization_id,
+                Invoice.merchant_account_id == payment.merchant_account_id,
+            )
+            .first()
+        )
+        if invoice and invoice.status != "paid":
+            invoice.status = "paid"
+            invoice.payment_id = payment.id
+            invoice.paid_at = utcnow()
     audit(
         db,
         organization_id=payment.organization_id,

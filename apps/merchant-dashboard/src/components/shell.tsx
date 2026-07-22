@@ -9,6 +9,10 @@ import { Icon, type IconName } from "./icons";
 type NavItem = { label: string; href: string; icon: IconName; group: "Operate" | "Configure" | "Platform" };
 const navigation: NavItem[] = [
   { label: "Payments", href: "/payments", icon: "payments", group: "Operate" },
+  { label: "Walk-ins", href: "/walk-ins", icon: "payments", group: "Operate" },
+  { label: "Catalog", href: "/catalog", icon: "invoices", group: "Operate" },
+  { label: "Invoices", href: "/invoices", icon: "invoices", group: "Operate" },
+  { label: "Reports", href: "/reports", icon: "audit", group: "Operate" },
   { label: "Callbacks", href: "/callbacks", icon: "callbacks", group: "Operate" },
   { label: "Reconciliation", href: "/reconciliation", icon: "reconcile", group: "Operate" },
   { label: "Onboarding", href: "/onboarding", icon: "onboarding", group: "Configure" },
