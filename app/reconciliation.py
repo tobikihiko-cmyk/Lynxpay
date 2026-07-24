@@ -19,7 +19,13 @@ from app.models import (
     PaymentAttempt,
     PaymentStatusCheck,
 )
-from app.observability import DARAJA_REQUEST_DURATION, PAYMENT_OUTCOMES, RECONCILIATION_CHECKS
+from app.observability import (
+    DARAJA_REQUEST_DURATION,
+    MERCHANT_PAYMENT_OUTCOMES,
+    MPESA_RESULT_CODES,
+    PAYMENT_OUTCOMES,
+    RECONCILIATION_CHECKS,
+)
 from app.provider_codes import classify_mpesa_result
 from app.service import (
     audit,
@@ -122,6 +128,7 @@ async def reconcile_payment(
         "organization_id": payment.organization_id,
         "merchant_account_id": payment.merchant_account_id,
         "checkout_request_id": payment.checkout_request_id,
+        "correlation_id": payment.correlation_id,
     }
     merchant = (
         db.query(MerchantAccount).filter(MerchantAccount.id == payment.merchant_account_id).first()
@@ -147,6 +154,7 @@ async def reconcile_payment(
                 secrets=decrypted_secrets(credential),
                 shortcode=shortcode,
                 checkout_request_id=snapshot["checkout_request_id"],
+                correlation_id=snapshot["correlation_id"],
             )
         finally:
             DARAJA_REQUEST_DURATION.labels("stk_status_query", environment).observe(
@@ -262,8 +270,10 @@ async def reconcile_payment(
     )
     db.add(check)
     RECONCILIATION_CHECKS.labels(outcome).inc()
+    MPESA_RESULT_CODES.labels("stk_status_query", code or "transport_error").inc()
     if outcome in {"success", "failed", "timeout"}:
         PAYMENT_OUTCOMES.labels(outcome, "status_query").inc()
+        MERCHANT_PAYMENT_OUTCOMES.labels(payment.merchant_account_id, outcome, "status_query").inc()
     audit(
         db,
         organization_id=payment.organization_id,

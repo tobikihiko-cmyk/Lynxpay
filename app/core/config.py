@@ -12,6 +12,8 @@ class Settings(BaseSettings):
 
     APP_NAME: str = "LynxPay"
     APP_VERSION: str = "0.1.0"
+    RELEASE_SHA: str = ""
+    RENDER_GIT_COMMIT: str = ""
     ENVIRONMENT: str = "development"
     PROCESS_TYPE: str = "api"
     DEBUG: bool = False
@@ -54,12 +56,15 @@ class Settings(BaseSettings):
     OTEL_EXPORTER_OTLP_ENDPOINT: str = ""
 
     PUBLIC_BASE_URL: str = ""
+    RENDER_EXTERNAL_URL: str = ""
     ALLOWED_ORIGINS: str = "http://localhost:3000"
     TRUSTED_PROXY_CIDRS: str = "127.0.0.1/32"
     TRUST_CF_CONNECTING_IP: bool = False
     MPESA_CALLBACK_VERIFY_MODE: str = "ip_allowlist"
     MPESA_CALLBACK_IP_ALLOWLIST: str = "196.201.214.200/29,196.201.214.208/29"
     MPESA_WEBHOOK_SECRET: str = ""
+    DARAJA_SANDBOX_BASE_URL: str = "https://sandbox.safaricom.co.ke"
+    DARAJA_PRODUCTION_BASE_URL: str = "https://api.safaricom.co.ke"
     MAX_CALLBACK_BODY_BYTES: int = 65536
     RATE_LIMIT_CALLBACK_REQUESTS_PER_MINUTE: int = 60
     RATE_LIMIT_CALLBACK_VERIFIED_REQUESTS_PER_MINUTE: int = 600
@@ -82,6 +87,7 @@ class Settings(BaseSettings):
     RECONCILIATION_MANUAL_REVIEW_AFTER_HOURS: int = 24
     RECONCILIATION_MAX_ATTEMPTS: int = 40
     STK_SUBMITTING_TIMEOUT_SECONDS: int = 120
+    REVERSAL_LEASE_SECONDS: int = 60
     MAINTENANCE_BATCH_SIZE: int = 100
     WORKER_HEARTBEAT_MAX_AGE_SECONDS: int = 120
     RETENTION_DELETION_ENABLED: bool = False
@@ -128,6 +134,14 @@ class Settings(BaseSettings):
     def mpesa_callback_hmac(self) -> bool:
         return self.MPESA_CALLBACK_VERIFY_MODE == "hmac"
 
+    @property
+    def public_url(self) -> str:
+        return (self.PUBLIC_BASE_URL or self.RENDER_EXTERNAL_URL).rstrip("/")
+
+    @property
+    def release_sha(self) -> str:
+        return self.RELEASE_SHA or self.RENDER_GIT_COMMIT or "development"
+
     def validate_runtime(self) -> None:
         process_type = self.PROCESS_TYPE.strip().lower()
         if process_type not in {"api", "worker", "migration", "cli"}:
@@ -146,6 +160,11 @@ class Settings(BaseSettings):
             len(self.SECRET_KEY) < 32 or self.SECRET_KEY.startswith("change-me")
         ):
             raise RuntimeError("A random SECRET_KEY of at least 32 characters is required")
+        if self.is_production and (
+            self.DARAJA_SANDBOX_BASE_URL != "https://sandbox.safaricom.co.ke"
+            or self.DARAJA_PRODUCTION_BASE_URL != "https://api.safaricom.co.ke"
+        ):
+            raise RuntimeError("Production Daraja endpoints must use Safaricom")
         provider = self.ENCRYPTION_PROVIDER.strip().lower()
         if provider not in {"local", "aws_kms"}:
             raise RuntimeError("ENCRYPTION_PROVIDER must be local or aws_kms")
@@ -163,7 +182,7 @@ class Settings(BaseSettings):
                 raise RuntimeError("Encryption key configuration must be valid JSON") from exc
             if not isinstance(keys, dict) or self.ENCRYPTION_ACTIVE_KEY_ID not in keys:
                 raise RuntimeError("ENCRYPTION_ACTIVE_KEY_ID must exist in key configuration")
-        if self.is_production and not self.PUBLIC_BASE_URL.startswith("https://"):
+        if self.is_production and not self.public_url.startswith("https://"):
             raise RuntimeError("PUBLIC_BASE_URL must be HTTPS in production")
         if self.mpesa_callback_hmac and not self.MPESA_WEBHOOK_SECRET:
             raise RuntimeError("MPESA_WEBHOOK_SECRET is required in hmac callback mode")

@@ -26,15 +26,34 @@ ALTER DEFAULT PRIVILEGES FOR ROLE lynxpay_owner IN SCHEMA public
 DO $$
 DECLARE
     table_name text;
+    all_rls_tables text[] := ARRAY[
+        'lynxpay_merchant_accounts', 'lynxpay_api_keys',
+        'lynxpay_catalog_items', 'lynxpay_invoices',
+        'lynxpay_invoice_line_items', 'lynxpay_payments',
+        'lynxpay_payment_status_checks', 'lynxpay_webhook_endpoints',
+        'lynxpay_payment_ledger', 'lynxpay_audit_logs',
+        'lynxpay_daraja_credentials', 'lynxpay_payment_attempts',
+        'lynxpay_mpesa_callbacks', 'lynxpay_webhook_deliveries',
+        'lynxpay_webhook_delivery_attempts', 'lynxpay_reversal_requests',
+        'lynxpay_reversal_callbacks'
+    ];
+    worker_tables text[] := ARRAY[
+        'lynxpay_merchant_accounts', 'lynxpay_invoices', 'lynxpay_payments',
+        'lynxpay_payment_status_checks', 'lynxpay_webhook_endpoints',
+        'lynxpay_payment_ledger', 'lynxpay_audit_logs',
+        'lynxpay_daraja_credentials', 'lynxpay_payment_attempts',
+        'lynxpay_mpesa_callbacks',
+        'lynxpay_webhook_deliveries', 'lynxpay_webhook_delivery_attempts',
+        'lynxpay_reversal_requests', 'lynxpay_reversal_callbacks'
+    ];
+    metrics_tables text[] := ARRAY[
+        'lynxpay_payments', 'lynxpay_mpesa_callbacks',
+        'lynxpay_webhook_endpoints', 'lynxpay_webhook_deliveries',
+        'lynxpay_reversal_requests'
+    ];
 BEGIN
-    FOREACH table_name IN ARRAY ARRAY[
-        'lynxpay_payments', 'lynxpay_payment_status_checks',
-        'lynxpay_webhook_endpoints', 'lynxpay_payment_ledger',
-        'lynxpay_audit_logs', 'lynxpay_daraja_credentials',
-        'lynxpay_payment_attempts', 'lynxpay_mpesa_callbacks',
-        'lynxpay_webhook_deliveries', 'lynxpay_webhook_delivery_attempts'
-    ] LOOP
-        IF NOT EXISTS (
+    FOREACH table_name IN ARRAY all_rls_tables LOOP
+        IF table_name = ANY(worker_tables) AND NOT EXISTS (
             SELECT 1 FROM pg_policies p
             WHERE p.schemaname = 'public'
               AND p.tablename = table_name
@@ -56,7 +75,7 @@ BEGIN
                 'TO lynxpay_admin USING (true) WITH CHECK (true)', table_name
             );
         END IF;
-        IF NOT EXISTS (
+        IF table_name = ANY(metrics_tables) AND NOT EXISTS (
             SELECT 1 FROM pg_policies p
             WHERE p.schemaname = 'public'
               AND p.tablename = table_name

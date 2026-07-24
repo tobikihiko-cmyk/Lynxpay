@@ -15,6 +15,9 @@ dist
 build
 **/build
 **/.next
+**/playwright-report
+**/test-results
+artifacts
 *.egg-info
 *.db
 apps/merchant-dashboard/.next

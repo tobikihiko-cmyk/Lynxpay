@@ -93,7 +93,7 @@ def credential(db, client, auth_headers, merchant):
     )
     assert response.status_code == 201, response.text
     with patch(
-        "app.router.DarajaClient.get_access_token", new=AsyncMock(return_value="test-oauth-token")
+        "app.daraja.DarajaClient.get_access_token", new=AsyncMock(return_value="test-oauth-token")
     ):
         tested = client.post(
             f"{BASE}/merchants/{merchant['id']}/daraja-credentials/test",
@@ -112,7 +112,7 @@ def credential(db, client, auth_headers, merchant):
 def stk_payment(client, auth_headers, merchant, credential):
     del credential
     with patch(
-        "app.router.DarajaClient.stk_push",
+        "app.daraja.DarajaClient.stk_push",
         new=AsyncMock(
             return_value=(
                 {

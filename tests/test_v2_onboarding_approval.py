@@ -114,7 +114,7 @@ def test_production_activation_requires_consent_submission_and_independent_platf
     )
     assert credentials.status_code == 201, credentials.text
     with patch(
-        "app.router.DarajaClient.get_access_token",
+        "app.daraja.DarajaClient.get_access_token",
         new=AsyncMock(return_value="production-oauth-token"),
     ):
         tested = client.post(

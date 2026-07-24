@@ -5,7 +5,9 @@ RUN npm ci
 
 FROM node:22-alpine AS builder
 WORKDIR /app
-ENV NEXT_TELEMETRY_DISABLED=1
+ARG LYNXPAY_HTTPS_ONLY=true
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    LYNXPAY_HTTPS_ONLY=${LYNXPAY_HTTPS_ONLY}
 COPY --from=dependencies /app/node_modules ./node_modules
 COPY . .
 RUN npm run build

@@ -45,6 +45,19 @@ def set_tenant_context(db, organization_id: str) -> None:
         )
 
 
+def set_resource_context(db, resource: str, value: str) -> None:
+    """Bind a narrowly scoped public/bootstrap identifier for PostgreSQL RLS."""
+
+    allowed = {"api_key_prefix", "merchant_id", "public_invoice_id"}
+    if resource not in allowed:
+        raise ValueError(f"Unsupported RLS resource context: {resource}")
+    if db.bind and db.bind.dialect.name == "postgresql":
+        db.execute(
+            text(f"SELECT set_config('app.{resource}', :value, true)"),
+            {"value": value},
+        )
+
+
 def get_db():
     db = SessionLocal()
     try:

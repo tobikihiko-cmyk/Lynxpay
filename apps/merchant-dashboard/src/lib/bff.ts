@@ -2,8 +2,11 @@ import { cookies, headers } from "next/headers";
 import { NextResponse } from "next/server";
 import { mutationIsSameOrigin } from "./request-security";
 
-const apiBase = process.env.LYNXPAY_API_URL || "http://api:8000";
-const secure = process.env.NODE_ENV === "production";
+const configuredApi = process.env.LYNXPAY_API_URL || "api:8000";
+const apiBase = configuredApi.includes("://") ? configuredApi : `http://${configuredApi}`;
+const secure = process.env.LYNXPAY_COOKIE_SECURE
+  ? process.env.LYNXPAY_COOKIE_SECURE === "true"
+  : process.env.NODE_ENV === "production";
 const cookieOptions = { httpOnly: true, secure, sameSite: "strict" as const, path: "/" };
 
 export async function requireSameOrigin(): Promise<void> {

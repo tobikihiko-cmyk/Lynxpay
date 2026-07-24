@@ -76,7 +76,12 @@ configure_tracing(app, engine)
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "lynxpay", "version": settings.APP_VERSION}
+    return {
+        "status": "ok",
+        "service": "lynxpay",
+        "version": settings.APP_VERSION,
+        "release_sha": settings.release_sha,
+    }
 
 
 @app.get("/ready")

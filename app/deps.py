@@ -12,7 +12,7 @@ from app.core.config import settings
 from app.core.datetime_utils import ensure_utc_datetime
 from app.core.deps import get_db
 from app.core.security import decode_token
-from app.database import set_tenant_context
+from app.database import set_resource_context, set_tenant_context
 from app.models import ApiKey, AuthSession, MerchantAccount, User
 from app.security import api_key_prefix, verify_api_key
 
@@ -118,6 +118,7 @@ def get_principal(request: Request, db: Session = Depends(get_db)) -> Principal:
 
     prefix = api_key_prefix(token)
     if prefix:
+        set_resource_context(db, "api_key_prefix", prefix)
         record = (
             db.query(ApiKey).filter(ApiKey.key_prefix == prefix, ApiKey.status == "active").first()
         )

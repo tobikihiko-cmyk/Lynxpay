@@ -455,3 +455,73 @@ Merchant signs up
 LynxPay is therefore the operational control plane around merchant-owned
 M-PESA payments. It does not replace Safaricom settlement; it makes the Daraja
 payment lifecycle safer, more observable, and easier to integrate.
+
+## 15. Catalog and Invoice Collection
+
+Each merchant owns a separate catalog. A barber does not inherit spa services,
+and a tax consultant does not see law-firm services. A merchant may keep up to
+20 active products or services, with editable names, descriptions, prices,
+types, SKUs, and display order.
+
+An invoice can be created in two ways:
+
+- select catalog entries, quantities, and captured prices;
+- enter a one-off service title, description, and amount without using catalog.
+
+Catalog prices are copied into invoice line items. Editing the catalog later
+does not rewrite an invoice that was already sent.
+
+The invoice stores the merchant's public business name, address, support email,
+and business phone. It does not expose owner credentials or private account
+details. LynxPay creates an unguessable public payment URL that the merchant can
+send by SMS, WhatsApp, email, or another channel.
+
+When the client opens the link:
+
+1. LynxPay shows the merchant, service or products, amount, and invoice status.
+2. The client enters the Kenyan mobile number they want to pay from.
+3. LynxPay creates one payment linked to the invoice and starts STK Push.
+4. Duplicate clicks reuse the active payment instead of creating another prompt.
+5. Verified M-PESA success changes the invoice to `paid` and displays receipt evidence.
+6. A void, expired, or already-paid invoice cannot start a new payment.
+
+## 16. Walk-In Collection
+
+Walk-in mode is for barbers, salons, spas, clinics, repair counters, and similar
+businesses where collecting a full client profile or sending an invoice adds
+friction.
+
+The operator selects a catalog service or enters a description and amount,
+asks for the customer's M-PESA number, and starts STK Push immediately. LynxPay
+still creates the same durable payment intention, attempt, callback, receipt,
+ledger, audit, and reconciliation evidence. The difference is only the merchant
+workflow: there is no invoice or long-lived customer record.
+
+## 17. Reconciliation Reports
+
+The reports view derives operational truth from payments and invoices; it is
+not a general ledger or accounting package. Merchants can review and export:
+
+- daily successful collections;
+- pending, failed, timed-out, and unknown payments;
+- invoice amount, status, payment, and receipt reconciliation;
+- walk-in sales;
+- M-PESA receipt, amount, timestamp, and reference evidence;
+- CSV files for external reconciliation.
+
+Exports contain merchant-scoped data and must be handled as financial evidence.
+
+## 18. Reversals
+
+A successful M-PESA payment can enter the controlled full-reversal workflow.
+LynxPay does not silently or automatically reverse payments.
+
+1. An MFA-authenticated owner or administrator requests reversal with a reason.
+2. A different MFA-authenticated owner or administrator reviews and approves it.
+3. A reversal worker acquires a durable lease and submits Safaricom's reversal request once.
+4. Submission responses, result callbacks, timeout callbacks, audit events, and correlation IDs are retained.
+5. Only a verified provider success callback changes the payment from `success` to `reversed`.
+6. LynxPay appends reversal ledger evidence, queues `payment.reversed`, and reopens a paid invoice.
+
+Unknown, failed, or timed-out reversals remain visible for operator and
+Safaricom support review. Partial reversals are not currently supported.

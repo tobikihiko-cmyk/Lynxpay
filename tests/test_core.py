@@ -80,7 +80,7 @@ def credential(db, client, auth_headers, merchant):
     )
     assert response.status_code == 201, response.text
     with patch(
-        "app.router.DarajaClient.get_access_token", new=AsyncMock(return_value="test-oauth-token")
+        "app.daraja.DarajaClient.get_access_token", new=AsyncMock(return_value="test-oauth-token")
     ):
         tested = client.post(
             f"{BASE}/merchants/{merchant['id']}/daraja-credentials/test",
@@ -160,7 +160,7 @@ def test_payment_list_filters_merchant_verification_purpose(db, client, auth_hea
 @pytest.fixture
 def stk_payment(client, api_headers, merchant):
     with patch(
-        "app.router.DarajaClient.stk_push",
+        "app.daraja.DarajaClient.stk_push",
         new=AsyncMock(
             return_value=(
                 {
@@ -257,7 +257,7 @@ def test_invoice_link_collects_payment_and_marks_invoice_paid(
     assert public_invoice.json()["merchant"]["shortcode"] == "123456"
 
     with patch(
-        "app.router.DarajaClient.stk_push",
+        "app.daraja.DarajaClient.stk_push",
         new=AsyncMock(
             return_value=(
                 {
@@ -540,7 +540,7 @@ def test_merchant_requires_verified_credentials_before_activation(
         == 409
     )
     with patch(
-        "app.router.DarajaClient.get_access_token", new=AsyncMock(return_value="oauth-token")
+        "app.daraja.DarajaClient.get_access_token", new=AsyncMock(return_value="oauth-token")
     ):
         tested = client.post(
             f"{BASE}/merchants/{merchant['id']}/daraja-credentials/test",
@@ -557,7 +557,7 @@ def test_merchant_requires_verified_credentials_before_activation(
     )
 
     with patch(
-        "app.router.DarajaClient.stk_push",
+        "app.daraja.DarajaClient.stk_push",
         new=AsyncMock(
             return_value=(
                 {
@@ -823,7 +823,7 @@ def _post_stk(client, api_headers, merchant, reference):
 def test_stk_request_not_sent_becomes_failed(db, client, api_headers, merchant, credential):
     del credential
     with patch(
-        "app.router.DarajaClient.stk_push",
+        "app.daraja.DarajaClient.stk_push",
         new=AsyncMock(side_effect=DarajaRequestNotSentError("oauth failed")),
     ):
         response = _post_stk(client, api_headers, merchant, "NOT-SENT")
@@ -842,7 +842,7 @@ def test_stk_request_not_sent_becomes_failed(db, client, api_headers, merchant, 
 def test_stk_uncertain_transport_becomes_unknown(db, client, api_headers, merchant, credential):
     del credential
     with patch(
-        "app.router.DarajaClient.stk_push",
+        "app.daraja.DarajaClient.stk_push",
         new=AsyncMock(side_effect=TimeoutError("read timeout")),
     ):
         response = _post_stk(client, api_headers, merchant, "UNCERTAIN")
@@ -866,7 +866,7 @@ def test_stk_provider_rejection_and_missing_checkout_are_explicit(
     del credential
     reference = f"PROVIDER-{expected_status}"
     with patch(
-        "app.router.DarajaClient.stk_push",
+        "app.daraja.DarajaClient.stk_push",
         new=AsyncMock(return_value=(provider_response, {"Password": "proof"})),
     ):
         response = _post_stk(client, api_headers, merchant, reference)

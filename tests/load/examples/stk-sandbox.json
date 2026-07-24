@@ -1,0 +1,8 @@
+{
+  "merchant_id": "replace-with-active-sandbox-merchant-id",
+  "amount": 1,
+  "phone_number": "254700000000",
+  "external_reference": "load-sandbox",
+  "description": "Controlled LynxPay sandbox load test",
+  "purpose": "payment"
+}

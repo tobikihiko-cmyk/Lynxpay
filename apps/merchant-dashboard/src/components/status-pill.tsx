@@ -10,6 +10,12 @@ const tones: Record<string, string> = {
   stk_sent: "border-blue-200 bg-blue-50 text-blue-800 before:bg-blue-500",
   pending: "border-blue-200 bg-blue-50 text-blue-800 before:bg-blue-500",
   pending_approval: "border-violet-200 bg-violet-50 text-violet-800 before:bg-violet-500",
+  approved: "border-blue-200 bg-blue-50 text-blue-800 before:bg-blue-500",
+  submitting: "border-blue-200 bg-blue-50 text-blue-800 before:bg-blue-500",
+  submitted: "border-blue-200 bg-blue-50 text-blue-800 before:bg-blue-500",
+  succeeded: "border-emerald-200 bg-emerald-50 text-emerald-800 before:bg-emerald-500",
+  reversed: "border-emerald-200 bg-emerald-50 text-emerald-800 before:bg-emerald-500",
+  cancelled: "border-slate-200 bg-slate-50 text-slate-600 before:bg-slate-400",
   created: "border-slate-200 bg-slate-50 text-slate-700 before:bg-slate-400",
   inactive: "border-slate-200 bg-slate-50 text-slate-600 before:bg-slate-400"
 };

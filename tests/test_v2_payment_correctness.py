@@ -45,7 +45,7 @@ def credential(db, client, auth_headers, merchant):
     )
     assert created.status_code == 201, created.text
     with patch(
-        "app.router.DarajaClient.get_access_token", new=AsyncMock(return_value="v2-oauth-token")
+        "app.daraja.DarajaClient.get_access_token", new=AsyncMock(return_value="v2-oauth-token")
     ):
         tested = client.post(
             f"{BASE}/merchants/{merchant['id']}/daraja-credentials/test",
@@ -81,7 +81,7 @@ def credential(db, client, auth_headers, merchant):
 @pytest.fixture
 def stk_payment(client, auth_headers, merchant, credential):
     with patch(
-        "app.router.DarajaClient.stk_push",
+        "app.daraja.DarajaClient.stk_push",
         new=AsyncMock(return_value=_accepted("ws_V2_BASE_PAYMENT")),
     ):
         response = client.post(
@@ -152,7 +152,7 @@ def test_stk_attempt_is_committed_as_submitting_before_provider_io(
         assert attempt.submission_started_at is not None
         return _accepted("ws_V2_DURABLE_BOUNDARY")
 
-    with patch("app.router.DarajaClient.stk_push", new=inspect_submission_boundary):
+    with patch("app.daraja.DarajaClient.stk_push", new=inspect_submission_boundary):
         response = client.post(
             f"{BASE}/payments/stk-push",
             headers={**auth_headers, "Idempotency-Key": "v2-durable-boundary"},
@@ -291,7 +291,7 @@ def test_retry_failed_payment_preserves_identity_creates_attempt_two_and_audits(
     db, client, auth_headers, merchant, credential
 ):
     with patch(
-        "app.router.DarajaClient.stk_push",
+        "app.daraja.DarajaClient.stk_push",
         new=AsyncMock(side_effect=DarajaRequestNotSentError("connection not opened")),
     ):
         created = client.post(
@@ -305,7 +305,7 @@ def test_retry_failed_payment_preserves_identity_creates_attempt_two_and_audits(
     assert original["provider_acceptance_state"] == "rejected"
 
     with patch(
-        "app.router.DarajaClient.stk_push",
+        "app.daraja.DarajaClient.stk_push",
         new=AsyncMock(return_value=_accepted("ws_V2_RETRY_2")),
     ):
         retried = client.post(
@@ -358,7 +358,7 @@ def test_unknown_retry_requires_explicit_admin_override(client, auth_headers, me
     assert key.status_code == 201, key.text
     api_headers = {"X-API-Key": key.json()["api_key"]}
     with patch(
-        "app.router.DarajaClient.stk_push",
+        "app.daraja.DarajaClient.stk_push",
         new=AsyncMock(side_effect=RuntimeError("transport outcome unavailable")),
     ):
         created = client.post(
@@ -388,7 +388,7 @@ def test_unknown_retry_requires_explicit_admin_override(client, auth_headers, me
     assert api_key_denied.status_code == 403
 
     with patch(
-        "app.router.DarajaClient.stk_push",
+        "app.daraja.DarajaClient.stk_push",
         new=AsyncMock(return_value=_accepted("ws_V2_UNKNOWN_RETRY_2")),
     ):
         allowed = client.post(
@@ -431,7 +431,7 @@ def test_same_idempotency_key_with_different_request_returns_conflict(
     client, auth_headers, merchant, credential
 ):
     with patch(
-        "app.router.DarajaClient.stk_push",
+        "app.daraja.DarajaClient.stk_push",
         new=AsyncMock(return_value=_accepted("ws_V2_IDEMPOTENCY_1")),
     ):
         first = client.post(

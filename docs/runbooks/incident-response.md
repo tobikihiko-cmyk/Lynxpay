@@ -76,6 +76,22 @@ Compare checked-out connections, long transactions, query latency, PostgreSQL `m
 
 Separate OAuth, STK initiation, and status-query latency/errors by sandbox/production. Confirm Safaricom status and merchant credential validity. Treat transport timeouts and malformed acceptances as uncertain, not failed, and never issue a second STK request automatically.
 
+## Merchant-specific failures
+
+Compare the merchant's final outcomes, Safaricom result codes, credential
+environment, shortcode, callback arrival, and customer cancellation rate with
+the platform baseline. Suspend only that merchant's initiation when the fault is
+isolated. Preserve callback and reconciliation processing for in-flight
+payments, and never expose another merchant's rates or identifiers.
+
+## Reversal needs review
+
+1. Confirm request, independent approver, recent MFA, reason, payment success evidence, amount, receipt, and initiator credentials.
+2. Compare submission response, result/timeout callback, status, correlation ID, audit events, and ledger.
+3. Do not submit a second reversal while the first is accepted, uncertain, or awaiting callback.
+4. A successful provider callback is required before changing the payment to `reversed` and reopening its invoice.
+5. Escalate unknown or timed-out reversals to Safaricom with redacted evidence; record the support reference without mutating history.
+
 ## Payment or callback anomaly
 
 - Preserve raw payloads and lock affected records from manual edits.

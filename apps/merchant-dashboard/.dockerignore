@@ -3,4 +3,7 @@ node_modules
 .env*
 npm-debug.log*
 coverage
+playwright-report
+test-results
+artifacts
 .DS_Store

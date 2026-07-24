@@ -1,0 +1,105 @@
+services:
+  postgres:
+    ports: []
+
+  redis:
+    ports: []
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    env_file: []
+    environment: &backend-env
+      ENVIRONMENT: test
+      PROCESS_TYPE: api
+      DATABASE_URL: postgresql://lynxpay:local-development-only@postgres:5432/lynxpay
+      WORKER_DATABASE_URL: postgresql://lynxpay:local-development-only@postgres:5432/lynxpay
+      SECRET_KEY: e2e-jwt-secret-key-at-least-32-characters
+      SECRET_ENCRYPTION_KEY: e2e-encryption-key-separate-from-jwt
+      ENCRYPTION_KEYS_JSON: '{"v1":"e2e-envelope-master-key"}'
+      PUBLIC_BASE_URL: http://api:8000
+      DASHBOARD_PUBLIC_URL: http://dashboard:3000
+      ALLOWED_ORIGINS: http://dashboard:3000
+      REDIS_URL: redis://redis:6379/0
+      RATE_LIMIT_ENABLED: "true"
+      RATE_LIMIT_AUTH_REQUESTS_PER_MINUTE: "1000"
+      RATE_LIMIT_REQUESTS_PER_MINUTE: "1000"
+      MPESA_CALLBACK_IP_ALLOWLIST: ""
+      DARAJA_SANDBOX_BASE_URL: http://mock-daraja:8090
+      METRICS_ENABLED: "false"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    env_file: []
+    environment: *backend-env
+    ports:
+      - "8001:8000"
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    env_file: []
+    environment:
+      <<: *backend-env
+      PROCESS_TYPE: worker
+    command: ["python", "-m", "app.worker", "--mode", "all", "--poll-seconds", "0.25"]
+
+  mock-daraja:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    environment: *backend-env
+    command:
+      ["uvicorn", "tests.e2e.harness:daraja_app", "--host", "0.0.0.0", "--port", "8090"]
+    expose:
+      - "8090"
+
+  e2e-support:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    environment: *backend-env
+    command:
+      ["uvicorn", "tests.e2e.harness:support_app", "--host", "0.0.0.0", "--port", "8091"]
+    expose:
+      - "8091"
+    ports:
+      - "8091:8091"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  dashboard:
+    build:
+      args:
+        LYNXPAY_HTTPS_ONLY: "false"
+    environment:
+      LYNXPAY_COOKIE_SECURE: "false"
+    ports:
+      - "3001:3000"
+
+  playwright:
+    build:
+      context: ./apps/merchant-dashboard
+      dockerfile: Dockerfile.e2e
+    environment:
+      PLAYWRIGHT_BASE_URL: http://dashboard:3000
+      E2E_SUPPORT_URL: http://e2e-support:8091
+    volumes:
+      - ./apps/merchant-dashboard/test-results:/app/test-results
+      - ./apps/merchant-dashboard/playwright-report:/app/playwright-report
+    depends_on:
+      api:
+        condition: service_started
+      dashboard:
+        condition: service_started
+      worker:
+        condition: service_started
+      mock-daraja:
+        condition: service_started
+      e2e-support:
+        condition: service_started

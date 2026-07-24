@@ -51,12 +51,33 @@ groups:
           summary: "LynxPay has dead-lettered identity emails"
           runbook: "docs/runbooks/incident-response.md#api-errors"
       - alert: LynxPayUnknownPayments
-        expr: lynxpay_payments{status="unknown"} > 0
+        expr: lynxpay_payments_unknown_count > 0
         for: 15m
-        labels: { severity: page }
+        labels: { severity: ticket }
         annotations:
           summary: "LynxPay has payments requiring reconciliation"
           runbook: "docs/runbooks/incident-response.md#payment-or-callback-anomaly"
+      - alert: LynxPayOldUnknownPayment
+        expr: lynxpay_oldest_unknown_payment_age_seconds > 900
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "A payment has remained unknown for more than 15 minutes"
+          runbook: "docs/runbooks/incident-response.md#investigate-a-missing-customer-payment"
+      - alert: LynxPayCallbackP95DelayHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(lynxpay_callback_latency_seconds_bucket[10m]))) > 120
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "M-PESA callback p95 arrival delay exceeds two minutes"
+          runbook: "docs/runbooks/incident-response.md#payment-or-callback-anomaly"
+      - alert: LynxPayReconciliationBacklogHigh
+        expr: lynxpay_reconciliation_backlog > 100
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: "More than 100 payments are awaiting reconciliation"
+          runbook: "docs/runbooks/incident-response.md#investigate-a-missing-customer-payment"
       - alert: LynxPayOldReconciliationBacklog
         expr: lynxpay_oldest_reconciliation_age_seconds > 900
         for: 5m
@@ -92,19 +113,26 @@ groups:
         annotations:
           summary: "A merchant webhook endpoint was auto-paused"
           runbook: "docs/runbooks/incident-response.md#payment-or-callback-anomaly"
-      - alert: LynxPayWorkerHeartbeatMissing
-        expr: lynxpay_worker_heartbeat_age_seconds > 120
+      - alert: LynxPayWorkerModeHeartbeatStale
+        expr: max by (mode) (lynxpay_worker_mode_heartbeat_age_seconds{mode=~"webhooks|reconciliation|reversals|email|maintenance"}) > 120
         for: 2m
         labels: { severity: page }
         annotations:
-          summary: "No LynxPay worker heartbeat has been observed for two minutes"
+          summary: "LynxPay {{ $labels.mode }} worker heartbeat is stale"
+          runbook: "docs/runbooks/incident-response.md#worker-heartbeat-missing"
+      - alert: LynxPayWorkerModeMissing
+        expr: absent(lynxpay_worker_mode_heartbeat_age_seconds{mode="webhooks"}) or absent(lynxpay_worker_mode_heartbeat_age_seconds{mode="reconciliation"}) or absent(lynxpay_worker_mode_heartbeat_age_seconds{mode="reversals"}) or absent(lynxpay_worker_mode_heartbeat_age_seconds{mode="email"}) or absent(lynxpay_worker_mode_heartbeat_age_seconds{mode="maintenance"})
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "At least one required LynxPay worker mode is not reporting"
           runbook: "docs/runbooks/incident-response.md#worker-heartbeat-missing"
       - alert: LynxPayDatabasePoolSaturation
-        expr: lynxpay_database_pool_checked_out > 0.9 * 20
+        expr: lynxpay_database_pool_checked_out / clamp_min(lynxpay_database_pool_capacity, 1) > 0.9
         for: 10m
         labels: { severity: ticket }
         annotations:
-          summary: "LynxPay metrics database pool is near its configured capacity"
+          summary: "LynxPay database pool is above 90% of discovered capacity"
           runbook: "docs/runbooks/incident-response.md#database-pool-saturation"
       - alert: LynxPayDarajaErrorRateHigh
         expr: sum(rate(lynxpay_stk_push_failed_total[5m])) / clamp_min(sum(rate(lynxpay_payments_created_total[5m])), 0.001) > 0.1
@@ -113,3 +141,24 @@ groups:
         annotations:
           summary: "Daraja STK failure/uncertainty rate exceeds 10%"
           runbook: "docs/runbooks/incident-response.md#daraja-errors"
+      - alert: LynxPaySafaricomNonSuccessCodeRateHigh
+        expr: sum by (operation) (rate(lynxpay_mpesa_result_codes_total{code!~"0|200"}[10m])) / clamp_min(sum by (operation) (rate(lynxpay_mpesa_result_codes_total[10m])), 0.001) > 0.1
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: "Safaricom non-success response rate exceeds 10% for {{ $labels.operation }}"
+          runbook: "docs/runbooks/incident-response.md#daraja-errors"
+      - alert: LynxPayMerchantPaymentFailureRateHigh
+        expr: sum by (merchant_id) (rate(lynxpay_merchant_payment_outcomes_total{status=~"failure|unknown"}[15m])) / clamp_min(sum by (merchant_id) (rate(lynxpay_merchant_payment_outcomes_total[15m])), 0.001) > 0.2
+        for: 15m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Merchant {{ $labels.merchant_id }} payment failure rate exceeds 20%"
+          runbook: "docs/runbooks/incident-response.md#merchant-specific-failures"
+      - alert: LynxPayReversalNeedsReview
+        expr: sum(lynxpay_reversal_requests{status=~"unknown|timed_out|failed"}) > 0
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: "A reversal requires operator review"
+          runbook: "docs/runbooks/incident-response.md#reversal-needs-review"

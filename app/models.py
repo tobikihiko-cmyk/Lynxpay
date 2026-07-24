@@ -458,6 +458,7 @@ class Payment(TimestampMixin, Base):
     description = Column(String(300), nullable=False)
     purpose = Column(String(30), nullable=False, default="payment", index=True)
     callback_metadata = Column(JSON_TYPE, nullable=True)
+    correlation_id = Column(String(100), nullable=False, default=_uuid, index=True)
     status = Column(String(30), nullable=False, default="created", index=True)
     success_source = Column(String(30), nullable=False, default="unknown")
     receipt_status = Column(String(30), nullable=False, default="missing")
@@ -480,6 +481,9 @@ class Payment(TimestampMixin, Base):
     merchant = relationship("MerchantAccount", back_populates="payments")
     attempts = relationship(
         "PaymentAttempt", back_populates="payment", cascade="all, delete-orphan"
+    )
+    reversals = relationship(
+        "ReversalRequest", back_populates="payment", cascade="all, delete-orphan"
     )
 
 
@@ -711,6 +715,117 @@ class MpesaCallback(Base):
     link_reason = Column(String(500), nullable=True)
     received_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     source_ip = Column(String(45), nullable=True)
+
+
+class ReversalRequest(TimestampMixin, Base):
+    __tablename__ = "lynxpay_reversal_requests"
+    __table_args__ = (
+        UniqueConstraint(
+            "merchant_account_id",
+            "idempotency_key",
+            name="uq_lynxpay_reversal_merchant_idempotency",
+        ),
+        CheckConstraint("amount > 0", name="ck_lynxpay_reversal_amount_positive"),
+        CheckConstraint("currency = 'KES'", name="ck_lynxpay_reversal_currency_kes"),
+        CheckConstraint(
+            "status IN ('pending_approval','approved','submitting','submitted','succeeded','failed','timeout','unknown','cancelled')",
+            name="ck_lynxpay_reversal_status",
+        ),
+        Index(
+            "ix_lynxpay_reversal_queue",
+            "status",
+            "lease_expires_at",
+            "created_at",
+        ),
+    )
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    organization_id = Column(
+        String(36),
+        ForeignKey("lynxpay_organizations.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    merchant_account_id = Column(
+        String(36),
+        ForeignKey("lynxpay_merchant_accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    payment_id = Column(
+        String(36),
+        ForeignKey("lynxpay_payments.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    idempotency_key = Column(String(64), nullable=False)
+    idempotency_request_hash = Column(String(64), nullable=False)
+    amount = Column(Numeric(12, 2), nullable=False)
+    currency = Column(String(3), nullable=False, default="KES")
+    reason = Column(String(500), nullable=False)
+    status = Column(String(30), nullable=False, default="pending_approval", index=True)
+    requested_by_user_id = Column(
+        String(36), ForeignKey("lynxpay_users.id", ondelete="SET NULL"), nullable=True
+    )
+    approved_by_user_id = Column(
+        String(36), ForeignKey("lynxpay_users.id", ondelete="SET NULL"), nullable=True
+    )
+    originator_conversation_id = Column(String(160), nullable=True, unique=True, index=True)
+    conversation_id = Column(String(160), nullable=True, index=True)
+    provider_transaction_id = Column(String(100), nullable=True)
+    response_code = Column(String(30), nullable=True)
+    response_description = Column(String(500), nullable=True)
+    request_payload_redacted = Column(JSON_TYPE, nullable=True)
+    response_payload = Column(JSON_TYPE, nullable=True)
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+    submission_started_at = Column(DateTime(timezone=True), nullable=True)
+    submitted_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    lease_owner = Column(String(100), nullable=True, index=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True, index=True)
+
+    payment = relationship("Payment", back_populates="reversals")
+    callbacks = relationship(
+        "ReversalCallback", back_populates="reversal", cascade="all, delete-orphan"
+    )
+
+
+class ReversalCallback(Base):
+    __tablename__ = "lynxpay_reversal_callbacks"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    organization_id = Column(
+        String(36),
+        ForeignKey("lynxpay_organizations.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    merchant_account_id = Column(
+        String(36),
+        ForeignKey("lynxpay_merchant_accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    reversal_request_id = Column(
+        String(36),
+        ForeignKey("lynxpay_reversal_requests.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    callback_type = Column(String(20), nullable=False)
+    originator_conversation_id = Column(String(160), nullable=True, index=True)
+    conversation_id = Column(String(160), nullable=True, index=True)
+    result_code = Column(String(30), nullable=True)
+    result_description = Column(String(500), nullable=True)
+    transaction_id = Column(String(100), nullable=True)
+    raw_payload = Column(JSON_TYPE, nullable=False)
+    raw_body = Column(Text, nullable=False)
+    processing_status = Column(String(40), nullable=False, default="received", index=True)
+    processed_at = Column(DateTime(timezone=True), nullable=True)
+    received_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow, index=True)
+    source_ip = Column(String(45), nullable=True)
+
+    reversal = relationship("ReversalRequest", back_populates="callbacks")
 
 
 class PaymentStatusCheck(Base):

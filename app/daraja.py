@@ -13,10 +13,9 @@ import weakref
 
 import httpx
 
+from app.core.config import settings
 from app.observability import DARAJA_TOKEN_CACHE
 
-SANDBOX_BASE_URL = "https://sandbox.safaricom.co.ke"
-PRODUCTION_BASE_URL = "https://api.safaricom.co.ke"
 REDACTION_MASK = "*" * 8
 
 _TOKEN_CACHE: dict[tuple[int, str, str], tuple[str, float]] = {}
@@ -69,7 +68,11 @@ class DarajaSubmissionUncertainError(RuntimeError):
 
 class DarajaClient:
     def __init__(self, environment: str):
-        self.base_url = SANDBOX_BASE_URL if environment == "sandbox" else PRODUCTION_BASE_URL
+        self.base_url = (
+            settings.DARAJA_SANDBOX_BASE_URL
+            if environment == "sandbox"
+            else settings.DARAJA_PRODUCTION_BASE_URL
+        ).rstrip("/")
 
     async def get_access_token(self, secrets: DarajaSecrets) -> str:
         loop_id = id(asyncio.get_running_loop())
@@ -126,6 +129,7 @@ class DarajaClient:
         external_reference: str,
         description: str,
         callback_url: str,
+        correlation_id: str | None = None,
     ) -> tuple[dict, dict]:
         try:
             token = await self.get_access_token(secrets)
@@ -154,6 +158,7 @@ class DarajaClient:
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json",
+                    **({"X-LynxPay-Correlation-ID": correlation_id} if correlation_id else {}),
                 },
                 timeout=15,
             )
@@ -180,6 +185,7 @@ class DarajaClient:
         secrets: DarajaSecrets,
         shortcode: str,
         checkout_request_id: str,
+        correlation_id: str | None = None,
     ) -> tuple[dict, dict]:
         """Verify an STK request through Daraja's status-query API."""
 
@@ -195,11 +201,85 @@ class DarajaClient:
         response = await _shared_http_client(self.base_url).post(
             f"{self.base_url}/mpesa/stkpushquery/v1/query",
             json=payload,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                **({"X-LynxPay-Correlation-ID": correlation_id} if correlation_id else {}),
+            },
             timeout=15,
         )
         response.raise_for_status()
         return response.json(), payload
+
+    async def reverse_transaction(
+        self,
+        *,
+        secrets: DarajaSecrets,
+        initiator_name: str,
+        security_credential: str,
+        shortcode: str,
+        transaction_id: str,
+        amount: Decimal,
+        remarks: str,
+        result_url: str,
+        timeout_url: str,
+        occasion: str,
+        correlation_id: str | None = None,
+    ) -> tuple[dict, dict]:
+        """Submit a full M-PESA transaction reversal to Daraja."""
+
+        try:
+            token = await self.get_access_token(secrets)
+        except Exception as exc:
+            raise DarajaRequestNotSentError(
+                "Daraja OAuth failed before reversal submission"
+            ) from exc
+        payload = {
+            "Initiator": initiator_name,
+            "SecurityCredential": security_credential,
+            "CommandID": "TransactionReversal",
+            "TransactionID": transaction_id,
+            "Amount": int(amount),
+            "ReceiverParty": shortcode,
+            "RecieverIdentifierType": "11",
+            "ResultURL": result_url,
+            "QueueTimeOutURL": timeout_url,
+            "Remarks": remarks[:100],
+            "Occasion": occasion[:100],
+        }
+        try:
+            response = await _shared_http_client(self.base_url).post(
+                f"{self.base_url}/mpesa/reversal/v1/request",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    **({"X-LynxPay-Correlation-ID": correlation_id} if correlation_id else {}),
+                },
+                timeout=15,
+            )
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            raise DarajaRequestNotSentError(
+                "Daraja connection failed before reversal submission"
+            ) from exc
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            raise DarajaSubmissionUncertainError(
+                "Daraja reversal submission outcome is uncertain"
+            ) from exc
+        if getattr(response, "status_code", 200) >= 500:
+            raise DarajaSubmissionUncertainError(
+                "Daraja returned a server error after reversal submission"
+            )
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise DarajaRequestNotSentError("Daraja rejected the reversal HTTP request") from exc
+        try:
+            return response.json(), payload
+        except ValueError as exc:
+            raise DarajaSubmissionUncertainError(
+                "Daraja returned an unreadable reversal response"
+            ) from exc
 
 
 def redact_stk_payload(payload: dict) -> dict:
@@ -210,4 +290,13 @@ def redact_stk_payload(payload: dict) -> dict:
         redacted["PhoneNumber"] = f"{str(phone)[:6]}***{str(phone)[-3:]}"
     if party_a := redacted.get("PartyA"):
         redacted["PartyA"] = f"{str(party_a)[:6]}***{str(party_a)[-3:]}"
+    return redacted
+
+
+def redact_reversal_payload(payload: dict) -> dict:
+    redacted = dict(payload)
+    if "SecurityCredential" in redacted:
+        redacted["SecurityCredential"] = REDACTION_MASK
+    if "Initiator" in redacted:
+        redacted["Initiator"] = REDACTION_MASK
     return redacted

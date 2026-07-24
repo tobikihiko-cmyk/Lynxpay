@@ -48,3 +48,25 @@ jobs:
       - run: npx vitest run --pool=threads --maxWorkers=1
       - run: npm run build
       - run: npm audit --audit-level=high
+
+  browser-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the real merchant journey
+        run: >-
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml
+          up --build --abort-on-container-exit --exit-code-from playwright playwright
+      - name: Upload Playwright evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-evidence
+          path: |
+            apps/merchant-dashboard/test-results
+            apps/merchant-dashboard/playwright-report
+          if-no-files-found: warn
+      - name: Stop E2E services
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml down --volumes

@@ -18,10 +18,18 @@ from app.email_delivery import claim_emails, deliver_claimed_email
 from app.maintenance import abandon_stale_stk_submissions
 from app.models import WorkerHeartbeat
 from app.reconciliation import claim_reconciliations, reconcile_payment
+from app.reversals import claim_reversals, submit_claimed_reversal
 from app.service import utcnow
 from app.webhooks import claim_deliveries, deliver_claimed
 
-WORKER_MODES = {"all", "webhooks", "reconciliation", "email", "maintenance"}
+WORKER_MODES = {
+    "all",
+    "webhooks",
+    "reconciliation",
+    "reversals",
+    "email",
+    "maintenance",
+}
 
 
 async def _drain_bounded_queue(
@@ -93,6 +101,7 @@ async def run_once(worker_id: str, limit: int, mode: str = "all") -> int:
         db.commit()
     deliveries_processed = 0
     reconciliations_processed = 0
+    reversals_processed = 0
     emails_processed = 0
     maintenance_ids: list[str] = []
     if mode in {"all", "webhooks"}:
@@ -103,6 +112,10 @@ async def run_once(worker_id: str, limit: int, mode: str = "all") -> int:
         reconciliations_processed = await _drain_bounded_queue(
             worker_id, limit, claim_reconciliations, _reconcile_claimed
         )
+    if mode in {"all", "reversals"}:
+        reversals_processed = await _drain_bounded_queue(
+            worker_id, limit, claim_reversals, submit_claimed_reversal
+        )
     if mode in {"all", "email"}:
         emails_processed = await _drain_bounded_queue(
             worker_id, limit, claim_emails, deliver_claimed_email
@@ -111,7 +124,11 @@ async def run_once(worker_id: str, limit: int, mode: str = "all") -> int:
         with WorkerSessionLocal() as db:
             maintenance_ids = abandon_stale_stk_submissions(db, limit)
     processed = (
-        deliveries_processed + reconciliations_processed + emails_processed + len(maintenance_ids)
+        deliveries_processed
+        + reconciliations_processed
+        + reversals_processed
+        + emails_processed
+        + len(maintenance_ids)
     )
     with WorkerSessionLocal() as db:
         heartbeat = db.query(WorkerHeartbeat).filter(WorkerHeartbeat.worker_id == worker_id).one()
@@ -120,6 +137,7 @@ async def run_once(worker_id: str, limit: int, mode: str = "all") -> int:
         heartbeat.metadata_json = {
             "webhooks": deliveries_processed,
             "reconciliations": reconciliations_processed,
+            "reversals": reversals_processed,
             "emails": emails_processed,
             "maintenance": len(maintenance_ids),
             "mode": mode,

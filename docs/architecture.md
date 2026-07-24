@@ -358,11 +358,32 @@ Alert rules cover API error rate, latency, rate-limit spikes, webhook/email dead
 - `POST /api/v1/api-keys`
 - `GET /api/v1/api-keys`
 - `DELETE /api/v1/api-keys/{api_key_id}`
+- `POST /api/v1/catalog-items`
+- `GET /api/v1/catalog-items`
+- `PATCH /api/v1/catalog-items/{item_id}`
 - `POST /api/v1/payments/stk-push`
 - `GET /api/v1/payments`
 - `GET /api/v1/payments/{payment_id}`
+- `GET /api/v1/payments/{payment_id}/attempts`
+- `GET /api/v1/payments/{payment_id}/timeline`
+- `POST /api/v1/payments/{payment_id}/retry`
 - `POST /api/v1/payments/{payment_id}/reconcile`
 - `GET /api/v1/payments/{payment_id}/status-checks`
+
+### Invoices and reversals
+
+- `POST /api/v1/invoices`
+- `GET /api/v1/invoices`
+- `GET /api/v1/invoices/{invoice_id}`
+- `POST /api/v1/invoices/{invoice_id}/void`
+- `GET /api/v1/public/invoices/{public_id}`
+- `POST /api/v1/public/invoices/{public_id}/pay`
+- `POST /api/v1/payments/{payment_id}/reversals`
+- `GET /api/v1/reversals`
+- `GET /api/v1/reversals/{reversal_id}`
+- `POST /api/v1/reversals/{reversal_id}/approve`
+- `POST /api/v1/reversals/{reversal_id}/cancel`
+- `POST /api/v1/callbacks/mpesa/reversals/{merchant_id}/{callback_type}`
 
 ### Callbacks and webhooks
 
@@ -373,7 +394,10 @@ Alert rules cover API error rate, latency, rate-limit spikes, webhook/email dead
 - `GET /api/v1/webhooks/endpoints`
 - `PATCH /api/v1/webhooks/endpoints/{endpoint_id}`
 - `GET /api/v1/webhooks/deliveries`
+- `GET /api/v1/webhooks/deliveries/{delivery_id}`
 - `POST /api/v1/webhooks/deliveries/{delivery_id}/replay`
+- `POST /api/v1/webhooks/endpoints/{endpoint_id}/rotate-secret`
+- `POST /api/v1/webhooks/endpoints/{endpoint_id}/test`
 
 ### Operations
 
@@ -401,7 +425,12 @@ Migration is merchant-by-merchant. At each cutover, direct initiation pauses, ol
 
 The current local production-style baseline has verified:
 
-- **106 passed, 4 skipped** in the full Docker/PostgreSQL-backed suite at Alembic head `0012_v2_ledger_coupling`;
+- **106 passed, 6 skipped** in the backend suite at Alembic head `0017_payment_correlation`;
+- **108 passed, 4 skipped** when the backend and PostgreSQL concurrency cases run together in the disposable Docker test stack;
+- **17 passed** in the dashboard unit suite and a successful production dashboard build;
+- a clean dashboard install from the regenerated lockfile and **zero npm audit vulnerabilities** on Next.js `16.2.11`;
+- **1 passed** in the Docker-backed Playwright merchant journey covering registration through payment settlement and **2 passed** in the PostgreSQL concurrency/RLS suite;
+- fresh-database migration and runtime-grant validation across API, worker, metrics, admin, readonly, and migrator roles, with 53 tenant policies present;
 - simultaneous callback processing with one success transition/ledger event;
 - tenant isolation using real `NOSUPERUSER NOBYPASSRLS` API and worker roles, including role-scoped worker policies;
 - database-trigger rejection of ledger/audit mutation and environment-isolated API keys;
@@ -415,7 +444,7 @@ The current local production-style baseline has verified:
 - retention reporting that defaults to no deletion and long-lived audit/ledger evidence.
 - a bounded current-artifact HTTP read probe of 500 requests at concurrency 20 with zero failures, 148.3 requests/second, 127.1 ms mean, and 202.8 ms p95 on the local development stack; this is smoke evidence, not a production capacity claim.
 
-The four skips are opt-in Safaricom sandbox contract cases requiring dedicated credentials and explicit live-STK consent. Exact final lint, build, dependency-audit, and load-probe results belong in the implementation handoff; they must not be inferred from this document.
+The six skips are opt-in Safaricom sandbox contract cases requiring dedicated credentials and explicit live-STK consent. Exact final lint, build, dependency-audit, and load-probe results belong in the implementation handoff; they must not be inferred from this document.
 
 See `docs/v2-live-pilot-validation-2026-07-16.md` for the exact commands, failures, skips, role drill, bounded probe, and launch decision from this hardening pass.
 

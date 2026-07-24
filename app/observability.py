@@ -32,8 +32,17 @@ EMAIL_QUEUE = Gauge("lynxpay_email_deliveries", "Email outbox rows by state", ["
 PAYMENTS_STATE = Gauge("lynxpay_payments", "Payments by state", ["status"])
 PAYMENTS_PENDING_COUNT = Gauge("lynxpay_payments_pending_count", "Pending payments")
 PAYMENTS_UNKNOWN_COUNT = Gauge("lynxpay_payments_unknown_count", "Unknown payments")
+OLDEST_UNKNOWN_PAYMENT_AGE = Gauge(
+    "lynxpay_oldest_unknown_payment_age_seconds",
+    "Age of the oldest payment in unknown state",
+)
 WORKER_HEARTBEAT_AGE = Gauge(
     "lynxpay_worker_heartbeat_age_seconds", "Age of the freshest durable worker heartbeat"
+)
+WORKER_MODE_HEARTBEAT_AGE = Gauge(
+    "lynxpay_worker_mode_heartbeat_age_seconds",
+    "Age of the freshest durable worker heartbeat by mode",
+    ["mode"],
 )
 CALLBACKS_STATE = Gauge("lynxpay_callbacks", "M-PESA callbacks by processing state", ["status"])
 RECONCILIATION_BACKLOG = Gauge(
@@ -55,6 +64,10 @@ OLDEST_WEBHOOK_AGE = Gauge(
 DATABASE_POOL_CHECKED_OUT = Gauge(
     "lynxpay_database_pool_checked_out", "Checked-out connections in the metrics database pool"
 )
+DATABASE_POOL_CAPACITY = Gauge(
+    "lynxpay_database_pool_capacity",
+    "Configured persistent plus overflow connection capacity",
+)
 DATABASE_GAUGE_ERRORS = Counter(
     "lynxpay_database_gauge_collection_errors_total",
     "Database-backed metric collection errors",
@@ -72,6 +85,22 @@ CALLBACKS_DUPLICATE = Counter("lynxpay_callbacks_duplicate", "Duplicate callback
 PAYMENT_OUTCOMES = Counter(
     "lynxpay_payment_outcomes", "Final or ambiguous payment outcomes", ["status", "source"]
 )
+MERCHANT_PAYMENT_OUTCOMES = Counter(
+    "lynxpay_merchant_payment_outcomes",
+    "Payment outcomes by merchant for initial pilot operations",
+    ["merchant_id", "status", "source"],
+)
+MPESA_RESULT_CODES = Counter(
+    "lynxpay_mpesa_result_codes",
+    "Safaricom response and result codes by operation",
+    ["operation", "code"],
+)
+CALLBACK_LATENCY = Histogram(
+    "lynxpay_callback_latency_seconds",
+    "Elapsed time from payment creation to provider callback receipt",
+    ["outcome"],
+    buckets=(0.5, 1, 2, 5, 10, 30, 60, 120, 300, 900, 3600),
+)
 WEBHOOK_DELIVERY_OUTCOMES = Counter(
     "lynxpay_webhook_delivery_outcomes", "Webhook delivery attempt outcomes", ["status"]
 )
@@ -86,6 +115,16 @@ DARAJA_REQUEST_DURATION = Histogram(
 DARAJA_TOKEN_CACHE = Counter(
     "lynxpay_daraja_token_cache_total", "Daraja OAuth token cache outcomes", ["outcome"]
 )
+REVERSAL_SUBMISSIONS = Counter(
+    "lynxpay_reversal_submissions_total",
+    "M-PESA reversal submission outcomes",
+    ["outcome"],
+)
+REVERSALS_STATE = Gauge(
+    "lynxpay_reversal_requests",
+    "M-PESA reversal requests by state",
+    ["status"],
+)
 
 LOGGER = logging.getLogger("lynxpay.requests")
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{8,100}$")
@@ -99,6 +138,7 @@ def refresh_database_gauges(db) -> None:
         MpesaCallback,
         Payment,
         PaymentAttempt,
+        ReversalRequest,
         WebhookDelivery,
         WebhookEndpoint,
         WorkerHeartbeat,
@@ -108,6 +148,7 @@ def refresh_database_gauges(db) -> None:
         (WEBHOOK_QUEUE, WebhookDelivery),
         (EMAIL_QUEUE, EmailOutbox),
         (PAYMENTS_STATE, Payment),
+        (REVERSALS_STATE, ReversalRequest),
     )
     try:
         for gauge, model in groups:
@@ -119,9 +160,23 @@ def refresh_database_gauges(db) -> None:
             db.query(Payment).filter(Payment.status.in_(["created", "pending", "stk_sent"])).count()
         )
         PAYMENTS_UNKNOWN_COUNT.set(db.query(Payment).filter(Payment.status == "unknown").count())
+        oldest_unknown = (
+            db.query(func.min(Payment.created_at)).filter(Payment.status == "unknown").scalar()
+        )
+        OLDEST_UNKNOWN_PAYMENT_AGE.set(
+            max(time.time() - oldest_unknown.timestamp(), 0) if oldest_unknown else 0
+        )
         freshest = db.query(func.max(WorkerHeartbeat.last_seen_at)).scalar()
         if freshest:
             WORKER_HEARTBEAT_AGE.set(max(time.time() - freshest.timestamp(), 0))
+        mode_heartbeats: dict[str, float] = {}
+        for heartbeat in db.query(WorkerHeartbeat).all():
+            mode = str((heartbeat.metadata_json or {}).get("mode") or "unknown")
+            timestamp = heartbeat.last_seen_at.timestamp()
+            mode_heartbeats[mode] = max(mode_heartbeats.get(mode, 0), timestamp)
+        WORKER_MODE_HEARTBEAT_AGE.clear()
+        for mode, timestamp in mode_heartbeats.items():
+            WORKER_MODE_HEARTBEAT_AGE.labels(mode).set(max(time.time() - timestamp, 0))
         callback_rows = (
             db.query(MpesaCallback.processing_status, func.count(MpesaCallback.id))
             .group_by(MpesaCallback.processing_status)
@@ -165,6 +220,10 @@ def refresh_database_gauges(db) -> None:
         checkedout = getattr(pool, "checkedout", None)
         if callable(checkedout):
             DATABASE_POOL_CHECKED_OUT.set(checkedout())
+        size = getattr(pool, "size", None)
+        overflow = getattr(pool, "_max_overflow", 0)
+        if callable(size):
+            DATABASE_POOL_CAPACITY.set(max(size() + max(int(overflow), 0), 1))
     except SQLAlchemyError:
         DATABASE_GAUGE_ERRORS.inc()
 

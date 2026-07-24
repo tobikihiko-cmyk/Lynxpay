@@ -53,6 +53,9 @@ def audit(
     request: Request | None = None,
     metadata: dict | None = None,
 ) -> AuditLog:
+    audit_metadata = dict(metadata or {})
+    if request and (correlation_id := getattr(request.state, "request_id", None)):
+        audit_metadata.setdefault("correlation_id", correlation_id)
     entry = AuditLog(
         organization_id=organization_id,
         merchant_account_id=merchant_id,
@@ -61,7 +64,7 @@ def audit(
         action=action,
         entity_type=entity_type,
         entity_id=entity_id,
-        metadata_json=metadata,
+        metadata_json=audit_metadata or None,
         ip_address=get_client_ip(request) if request else None,
         user_agent=request.headers.get("user-agent", "")[:500] if request else None,
     )
@@ -118,6 +121,21 @@ def transition_and_record(
             invoice.status = "paid"
             invoice.payment_id = payment.id
             invoice.paid_at = utcnow()
+    elif target == "reversed" and payment.invoice_id:
+        invoice = (
+            db.query(Invoice)
+            .filter(
+                Invoice.id == payment.invoice_id,
+                Invoice.organization_id == payment.organization_id,
+                Invoice.merchant_account_id == payment.merchant_account_id,
+                Invoice.payment_id == payment.id,
+            )
+            .first()
+        )
+        if invoice:
+            invoice.status = "sent"
+            invoice.payment_id = None
+            invoice.paid_at = None
     audit(
         db,
         organization_id=payment.organization_id,
@@ -193,6 +211,25 @@ def decrypted_secrets(credential: DarajaCredential) -> DarajaSecrets:
     return DarajaSecrets(*values)
 
 
+def decrypted_reversal_credentials(credential: DarajaCredential) -> tuple[str, str]:
+    ciphertexts = (
+        credential.initiator_name_encrypted,
+        credential.security_credential_encrypted,
+    )
+    if not all(is_encrypted_value(value) for value in ciphertexts):
+        raise HTTPException(
+            status_code=409,
+            detail="Daraja initiator name and security credential are required for reversals",
+        )
+    values = decrypt_sensitive_values(list(ciphertexts))
+    if not all(values):
+        raise HTTPException(
+            status_code=500,
+            detail="Daraja reversal credentials could not be decrypted",
+        )
+    return values[0], values[1]
+
+
 def payment_payload(payment: Payment) -> dict:
     return {
         "id": payment.id,
@@ -206,6 +243,7 @@ def payment_payload(payment: Payment) -> dict:
         "currency": payment.currency,
         "description": payment.description,
         "purpose": payment.purpose,
+        "correlation_id": payment.correlation_id,
         "status": payment.status,
         "success_source": payment.success_source,
         "receipt_status": payment.receipt_status,
@@ -235,6 +273,7 @@ def queue_webhooks(db: Session, payment: Payment, event_type: str) -> list[Webho
     )
     payload = {
         "id": f"evt_{uuid.uuid4()}",
+        "correlation_id": payment.correlation_id,
         "event": event_type,
         "created_at": utcnow().isoformat(),
         "data": {"payment": payment_payload(payment)},

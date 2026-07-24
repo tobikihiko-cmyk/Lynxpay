@@ -302,6 +302,14 @@ class PaymentRetryRequest(BaseModel):
     allow_uncertain: bool = False
 
 
+class ReversalRequestCreate(BaseModel):
+    reason: str = Field(min_length=12, max_length=500)
+
+
+class ReversalApproval(BaseModel):
+    note: str | None = Field(None, max_length=500)
+
+
 class WebhookEndpointCreate(BaseModel):
     merchant_id: str | None = None
     url: HttpUrl

@@ -1,0 +1,143 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Payment success rate",
+      "id": 1,
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(lynxpay_payment_outcomes_total{status=\"success\"}[15m])) / clamp_min(sum(rate(lynxpay_payment_outcomes_total[15m])), 0.001)",
+          "legendFormat": "success"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "orange", "value": 0.95},
+              {"color": "green", "value": 0.99}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "type": "stat",
+      "title": "Unknown payments",
+      "id": 2,
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 0},
+      "targets": [{"refId": "A", "expr": "lynxpay_payments_unknown_count"}],
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "type": "stat",
+      "title": "Oldest unknown payment",
+      "id": 3,
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0},
+      "targets": [{"refId": "A", "expr": "lynxpay_oldest_unknown_payment_age_seconds"}],
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 300}, {"color": "red", "value": 900}]}}, "overrides": []},
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "type": "stat",
+      "title": "Reconciliation backlog",
+      "id": 4,
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0},
+      "targets": [{"refId": "A", "expr": "lynxpay_reconciliation_backlog"}],
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 20}, {"color": "red", "value": 100}]}}, "overrides": []},
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "type": "timeseries",
+      "title": "API request rate and errors",
+      "id": 5,
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(lynxpay_http_requests_total[5m]))", "legendFormat": "all requests"},
+        {"refId": "B", "expr": "sum(rate(lynxpay_http_requests_total{status=~\"5..\"}[5m]))", "legendFormat": "5xx"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "M-PESA callback arrival p95",
+      "id": 6,
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+      "targets": [
+        {"refId": "A", "expr": "histogram_quantile(0.95, sum by (le, outcome) (rate(lynxpay_callback_latency_seconds_bucket[10m])))", "legendFormat": "{{outcome}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Worker heartbeat age",
+      "id": 7,
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 13},
+      "targets": [{"refId": "A", "expr": "lynxpay_worker_mode_heartbeat_age_seconds", "legendFormat": "{{mode}}"}],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Database pool usage",
+      "id": 8,
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 13},
+      "targets": [
+        {"refId": "A", "expr": "lynxpay_database_pool_checked_out", "legendFormat": "checked out"},
+        {"refId": "B", "expr": "lynxpay_database_pool_capacity", "legendFormat": "capacity"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Safaricom result codes",
+      "id": 9,
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 13},
+      "targets": [{"refId": "A", "expr": "sum by (operation, code) (rate(lynxpay_mpesa_result_codes_total[5m]))", "legendFormat": "{{operation}} / {{code}}"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}}
+    },
+    {
+      "type": "table",
+      "title": "Merchant payment outcomes (15m)",
+      "id": 10,
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 21},
+      "targets": [{"refId": "A", "expr": "sum by (merchant_id, status) (increase(lynxpay_merchant_payment_outcomes_total[15m]))", "format": "table", "instant": true}],
+      "options": {"showHeader": true}
+    },
+    {
+      "type": "timeseries",
+      "title": "Webhook delivery age",
+      "id": 11,
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 21},
+      "targets": [{"refId": "A", "expr": "lynxpay_oldest_webhook_age_seconds", "legendFormat": "oldest queued delivery"}],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}}
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["lynxpay", "payments", "mpesa"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timezone": "browser",
+  "title": "LynxPay Production Overview",
+  "uid": "lynxpay-overview",
+  "version": 1
+}

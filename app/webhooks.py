@@ -103,6 +103,7 @@ async def send_webhook(endpoint: WebhookEndpoint, delivery: WebhookDelivery) -> 
         "X-LynxPay-Delivery-Id": delivery.id,
         "X-LynxPay-Event": delivery.event_type,
         "X-LynxPay-Signature": sign_payload(secret, timestamp, body),
+        "X-LynxPay-Correlation-ID": str(delivery.payload.get("correlation_id") or delivery.id),
     }
     timeout = httpx.Timeout(
         settings.WEBHOOK_TOTAL_TIMEOUT_SECONDS,

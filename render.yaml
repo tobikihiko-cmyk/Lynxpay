@@ -1,0 +1,237 @@
+# yaml-language-server: $schema=https://render.com/schema/render.yaml.json
+previews:
+  generation: manual
+  expireAfterDays: 3
+
+databases:
+  - name: lynxpay-postgres
+    plan: pro-4gb
+    region: frankfurt
+    databaseName: lynxpay
+    user: lynxpay_bootstrap
+    postgresMajorVersion: "16"
+    connectionPool: pgbouncer
+    storageAutoscalingEnabled: true
+    ipAllowList: []
+    highAvailability:
+      enabled: true
+
+services:
+  - type: keyvalue
+    name: lynxpay-redis
+    plan: starter
+    ipAllowList: []
+    maxmemoryPolicy: noeviction
+    persistenceMode: journal-snapshot
+
+  - type: web
+    name: lynxpay-api
+    runtime: docker
+    plan: standard
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: /bin/sh -c "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000}"
+    preDeployCommand: /app/ops/render-predeploy.sh
+    healthCheckPath: /ready
+    maxShutdownDelaySeconds: 60
+    autoDeployTrigger: checksPass
+    scaling:
+      minInstances: 2
+      maxInstances: 4
+      targetCPUPercent: 70
+      targetMemoryPercent: 75
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: PROCESS_TYPE
+        value: api
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
+      - key: ADMIN_DATABASE_URL
+        sync: false
+      - key: METRICS_DATABASE_URL
+        sync: false
+      - key: MIGRATION_DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: lynxpay-redis
+          property: connectionString
+      - key: RATE_LIMIT_ENABLED
+        value: "true"
+      - key: ENCRYPTION_PROVIDER
+        value: local
+      - key: ENCRYPTION_ACTIVE_KEY_ID
+        value: v1
+      - key: ENCRYPTION_KEYS_JSON
+        sync: false
+      - key: EMAIL_DELIVERY_MODE
+        value: smtp
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USERNAME
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_FROM_EMAIL
+        sync: false
+      - key: SMTP_STARTTLS
+        value: "true"
+      - key: DASHBOARD_PUBLIC_URL
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: MPESA_CALLBACK_VERIFY_MODE
+        value: ip_allowlist
+      - key: MPESA_CALLBACK_IP_ALLOWLIST
+        value: 196.201.214.200/29,196.201.214.208/29
+      - key: REQUIRE_PRIVILEGED_MFA
+        value: "true"
+      - key: METRICS_ENABLED
+        value: "true"
+      - key: METRICS_BEARER_TOKEN
+        generateValue: true
+      - key: OTEL_EXPORTER_OTLP_ENDPOINT
+        sync: false
+
+  - type: web
+    name: lynxpay-dashboard
+    runtime: docker
+    plan: standard
+    region: frankfurt
+    dockerfilePath: ./apps/merchant-dashboard/Dockerfile
+    dockerContext: ./apps/merchant-dashboard
+    healthCheckPath: /sign-in
+    maxShutdownDelaySeconds: 30
+    autoDeployTrigger: checksPass
+    scaling:
+      minInstances: 2
+      maxInstances: 4
+      targetCPUPercent: 70
+      targetMemoryPercent: 75
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: LYNXPAY_API_URL
+        fromService:
+          type: web
+          name: lynxpay-api
+          property: hostport
+
+  - type: worker
+    name: lynxpay-webhook-worker
+    runtime: docker
+    plan: standard
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: python -m app.worker --mode webhooks
+    maxShutdownDelaySeconds: 60
+    autoDeployTrigger: checksPass
+    scaling:
+      minInstances: 1
+      maxInstances: 3
+      targetCPUPercent: 70
+      targetMemoryPercent: 75
+    envVars: &workerEnv
+      - key: ENVIRONMENT
+        value: production
+      - key: PROCESS_TYPE
+        value: worker
+      - key: SECRET_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: WORKER_DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: lynxpay-redis
+          property: connectionString
+      - key: ENCRYPTION_PROVIDER
+        value: local
+      - key: ENCRYPTION_ACTIVE_KEY_ID
+        value: v1
+      - key: ENCRYPTION_KEYS_JSON
+        sync: false
+      - key: EMAIL_DELIVERY_MODE
+        value: smtp
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USERNAME
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_FROM_EMAIL
+        sync: false
+      - key: SMTP_STARTTLS
+        value: "true"
+      - key: RATE_LIMIT_ENABLED
+        value: "true"
+      - key: REQUIRE_PRIVILEGED_MFA
+        value: "true"
+
+  - type: worker
+    name: lynxpay-reconciliation-worker
+    runtime: docker
+    plan: standard
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: python -m app.worker --mode reconciliation
+    maxShutdownDelaySeconds: 60
+    autoDeployTrigger: checksPass
+    scaling:
+      minInstances: 1
+      maxInstances: 2
+      targetCPUPercent: 70
+      targetMemoryPercent: 75
+    envVars: *workerEnv
+
+  - type: worker
+    name: lynxpay-reversal-worker
+    runtime: docker
+    plan: standard
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: python -m app.worker --mode reversals
+    maxShutdownDelaySeconds: 60
+    autoDeployTrigger: checksPass
+    numInstances: 1
+    envVars: *workerEnv
+
+  - type: worker
+    name: lynxpay-email-worker
+    runtime: docker
+    plan: standard
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: python -m app.worker --mode email
+    maxShutdownDelaySeconds: 60
+    autoDeployTrigger: checksPass
+    numInstances: 1
+    envVars: *workerEnv
+
+  - type: worker
+    name: lynxpay-maintenance-worker
+    runtime: docker
+    plan: starter
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: python -m app.worker --mode maintenance
+    maxShutdownDelaySeconds: 60
+    autoDeployTrigger: checksPass
+    numInstances: 1
+    envVars: *workerEnv
