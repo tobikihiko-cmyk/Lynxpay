@@ -73,12 +73,35 @@ function ReversalDialog({ payment, onClose, onComplete }: { payment: Payment; on
   </div>;
 }
 
+function ReversalApprovalDialog({ reversal, onClose, onApprove }: { reversal: Reversal; onClose: () => void; onApprove: (note: string) => Promise<void> }) {
+  const [note, setNote] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setSubmitting(true); setError("");
+    try { await onApprove(note); onClose(); }
+    catch (caught) { setError(caught instanceof Error ? caught.message : "Approval failed"); }
+    finally { setSubmitting(false); }
+  }
+  return <div className="fixed inset-0 z-50 grid place-items-center bg-[#041009]/65 p-4 backdrop-blur-sm" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
+    <form role="dialog" aria-modal="true" aria-labelledby="approval-title" className="surface w-full max-w-lg p-6 shadow-[var(--shadow-lg)]" onSubmit={submit}>
+      <div className="flex items-start justify-between gap-4"><div><p className="eyeline">Independent approval</p><h2 id="approval-title" className="mt-2 text-2xl font-bold">Approve full reversal</h2></div><button type="button" className="quiet-button !size-9 !p-0" onClick={onClose} aria-label="Close"><Icon name="close" className="size-4"/></button></div>
+      <div className="mt-5 border-l-4 border-amber-400 bg-amber-50 p-4 text-xs leading-5 text-amber-950"><strong className="block">KES {Number(reversal.amount).toLocaleString("en-KE")}</strong>{reversal.reason}</div>
+      <label className="field mt-5">Approval reason<textarea required minLength={8} maxLength={500} autoFocus value={note} onChange={event => setNote(event.target.value)} placeholder="Record the receipt, customer request, and evidence independently checked." /></label>
+      {error && <p className="mt-3 rounded-lg bg-red-50 p-3 text-xs text-red-800" role="alert">{error}</p>}
+      <div className="mt-6 flex justify-end gap-2"><button type="button" className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={submitting || note.trim().length < 8}><Icon name="approval" className="size-4"/>{submitting ? "Approving…" : "Approve reversal"}</button></div>
+    </form>
+  </div>;
+}
+
 export default function PaymentDetail({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const [data, setData] = useState<Timeline>();
   const [error, setError] = useState("");
   const [showRetry, setShowRetry] = useState(false);
   const [showReversal, setShowReversal] = useState(false);
+  const [approvalReversal, setApprovalReversal] = useState<Reversal>();
   const [user, setUser] = useState<CurrentUser>();
   const [reversalAction, setReversalAction] = useState("");
   const load = useCallback(async () => { try { setError(""); setData(await api<Timeline>(`/payments/${id}/timeline`)); } catch (caught) { setError(caught instanceof Error ? caught.message : "Could not load payment"); } }, [id]);
@@ -87,9 +110,9 @@ export default function PaymentDetail({ params }: { params: Promise<{ id: string
     Promise.all([api<Timeline>(`/payments/${id}/timeline`), api<CurrentUser>("/auth/me")]).then(([result, me]) => { if (active) { setData(result); setUser(me); } }).catch(caught => { if (active) setError(caught instanceof Error ? caught.message : "Could not load payment"); });
     return () => { active = false; };
   }, [id]);
-  const actOnReversal = useCallback(async (reversal: Reversal, action: "approve" | "cancel") => {
+  const actOnReversal = useCallback(async (reversal: Reversal, action: "approve" | "cancel" | "status-query", note?: string) => {
     setReversalAction(`${reversal.id}:${action}`); setError("");
-    try { await api(`/reversals/${reversal.id}/${action}`, { method: "POST", body: JSON.stringify(action === "approve" ? { note: "Approved from payment evidence review" } : {}) }); await load(); }
+    try { await api(`/reversals/${reversal.id}/${action}`, { method: "POST", body: JSON.stringify(action === "approve" ? { note } : {}) }); await load(); }
     catch (caught) { setError(caught instanceof Error ? caught.message : `Could not ${action} reversal`); }
     finally { setReversalAction(""); }
   }, [load]);
@@ -111,12 +134,12 @@ export default function PaymentDetail({ params }: { params: Promise<{ id: string
   const payment = data.payment;
   const retryable = canRetryPayment({ status: payment.status, provider_acceptance_state: payment.provider_acceptance_state || "", receipt_status: payment.receipt_status, mpesa_receipt_number: payment.mpesa_receipt_number });
   const latestReversal = data.reversals.at(-1);
-  const activeReversal = latestReversal && ["pending_approval", "approved", "submitting", "submitted", "unknown"].includes(latestReversal.status) ? latestReversal : undefined;
+  const activeReversal = latestReversal && ["pending_approval", "approved", "submitting", "submitted", "timeout", "unknown"].includes(latestReversal.status) ? latestReversal : undefined;
   const canRequestReversal = ["owner", "admin"].includes(user?.role || "") && payment.status === "success" && Boolean(payment.mpesa_receipt_number) && !activeReversal;
   const canApproveReversal = activeReversal?.status === "pending_approval" && ["owner", "admin"].includes(user?.role || "") && activeReversal.requested_by_user_id !== user?.id;
   return <section>
     <Link href="/payments" className="mb-5 inline-flex items-center gap-2 text-xs font-bold text-[#607168] no-underline hover:text-[#087448]"><Icon name="arrow" className="size-3.5 rotate-180"/>Back to payments</Link>
-    <PageHeader eyebrow="Payment evidence" title={payment.external_reference} description={payment.description || "M-PESA payment evidence and auditable state history."} action={<div className="flex flex-wrap items-center justify-end gap-2"><StatusPill status={payment.status}/>{retryable && <button className="secondary" onClick={() => setShowRetry(true)}><Icon name="refresh" className="size-4"/>Retry safely</button>}{canRequestReversal && <button className="secondary" onClick={() => setShowReversal(true)}><Icon name="reconcile" className="size-4"/>Request reversal</button>}{canApproveReversal && <button className="primary" disabled={Boolean(reversalAction)} onClick={() => void actOnReversal(activeReversal, "approve")}><Icon name="approval" className="size-4"/>Approve reversal</button>}</div>} />
+    <PageHeader eyebrow="Payment evidence" title={payment.external_reference} description={payment.description || "M-PESA payment evidence and auditable state history."} action={<div className="flex flex-wrap items-center justify-end gap-2"><StatusPill status={payment.status}/>{retryable && <button className="secondary" onClick={() => setShowRetry(true)}><Icon name="refresh" className="size-4"/>Retry safely</button>}{canRequestReversal && <button className="secondary" onClick={() => setShowReversal(true)}><Icon name="reconcile" className="size-4"/>Request reversal</button>}{activeReversal && ["submitted", "timeout", "unknown"].includes(activeReversal.status) && ["owner", "admin"].includes(user?.role || "") && <button className="secondary" disabled={Boolean(reversalAction)} onClick={() => void actOnReversal(activeReversal, "status-query")}><Icon name="refresh" className="size-4"/>Query Safaricom</button>}{canApproveReversal && <button className="primary" disabled={Boolean(reversalAction)} onClick={() => setApprovalReversal(activeReversal)}><Icon name="approval" className="size-4"/>Approve reversal</button>}</div>} />
     {error && <p role="alert" className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">{error}</p>}
     <div className="my-7 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <MetricCard label="Amount" value={`KES ${Number(payment.amount).toLocaleString("en-KE")}`} detail={payment.customer_name || payment.customer_phone} icon="payments" />
@@ -137,6 +160,9 @@ export default function PaymentDetail({ params }: { params: Promise<{ id: string
     )}
     {showReversal && (
       <ReversalDialog payment={payment} onClose={() => setShowReversal(false)} onComplete={load}/>
+    )}
+    {approvalReversal && (
+      <ReversalApprovalDialog reversal={approvalReversal} onClose={() => setApprovalReversal(undefined)} onApprove={note => actOnReversal(approvalReversal, "approve", note)}/>
     )}
   </section>;
 }

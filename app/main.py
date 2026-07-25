@@ -20,7 +20,7 @@ from app.observability import (
     configure_tracing,
     refresh_database_gauges,
 )
-from app.router import router as lynxpay_router
+from app.routers import router as lynxpay_router
 
 
 @asynccontextmanager

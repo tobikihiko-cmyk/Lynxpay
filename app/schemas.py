@@ -307,7 +307,7 @@ class ReversalRequestCreate(BaseModel):
 
 
 class ReversalApproval(BaseModel):
-    note: str | None = Field(None, max_length=500)
+    note: str = Field(min_length=8, max_length=500)
 
 
 class WebhookEndpointCreate(BaseModel):

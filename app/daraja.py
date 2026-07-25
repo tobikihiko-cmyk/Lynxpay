@@ -228,6 +228,8 @@ class DarajaClient:
     ) -> tuple[dict, dict]:
         """Submit a full M-PESA transaction reversal to Daraja."""
 
+        if amount != amount.to_integral_value():
+            raise ValueError("Daraja reversals require a whole KES amount")
         try:
             token = await self.get_access_token(secrets)
         except Exception as exc:
@@ -280,6 +282,48 @@ class DarajaClient:
             raise DarajaSubmissionUncertainError(
                 "Daraja returned an unreadable reversal response"
             ) from exc
+
+    async def query_transaction_status(
+        self,
+        *,
+        secrets: DarajaSecrets,
+        initiator_name: str,
+        security_credential: str,
+        shortcode: str,
+        transaction_id: str,
+        result_url: str,
+        timeout_url: str,
+        remarks: str,
+        occasion: str,
+        correlation_id: str | None = None,
+    ) -> tuple[dict, dict]:
+        """Ask Daraja for the authoritative state of an M-PESA transaction."""
+
+        token = await self.get_access_token(secrets)
+        payload = {
+            "Initiator": initiator_name,
+            "SecurityCredential": security_credential,
+            "CommandID": "TransactionStatusQuery",
+            "TransactionID": transaction_id,
+            "PartyA": shortcode,
+            "IdentifierType": "4",
+            "ResultURL": result_url,
+            "QueueTimeOutURL": timeout_url,
+            "Remarks": remarks[:100],
+            "Occasion": occasion[:100],
+        }
+        response = await _shared_http_client(self.base_url).post(
+            f"{self.base_url}/mpesa/transactionstatus/v1/query",
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                **({"X-LynxPay-Correlation-ID": correlation_id} if correlation_id else {}),
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        return response.json(), payload
 
 
 def redact_stk_payload(payload: dict) -> dict:

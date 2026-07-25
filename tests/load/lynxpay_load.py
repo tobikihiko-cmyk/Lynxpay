@@ -17,6 +17,13 @@ import uuid
 import httpx
 
 WRITE_SCENARIOS = {"callback-burst", "duplicate-callback", "concurrent-stk"}
+DEFAULT_P95_THRESHOLDS_MS = {
+    "ready": 500.0,
+    "payments-read": 750.0,
+    "callback-burst": 750.0,
+    "duplicate-callback": 750.0,
+    "concurrent-stk": 2500.0,
+}
 
 
 @dataclass
@@ -36,6 +43,7 @@ class Result:
     p99_ms: float
     max_ms: float
     threshold_ms: float
+    assertions: dict[str, bool]
     passed: bool
 
 
@@ -62,6 +70,48 @@ def unique_callback(payload: dict[str, Any], index: int) -> dict[str, Any]:
     return candidate
 
 
+def callback_checkout_id(payload: dict[str, Any]) -> str | None:
+    value = payload.get("Body", {}).get("stkCallback", {}).get("CheckoutRequestID")
+    return str(value) if value else None
+
+
+async def callback_evidence(
+    client: httpx.AsyncClient,
+    *,
+    headers: dict[str, str],
+    merchant_id: str,
+    checkout_ids: set[str],
+    expected_count: int,
+    received_after: datetime,
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    before: str | None = None
+    for _ in range(20):
+        params: dict[str, str | int] = {"merchant_id": merchant_id, "limit": 500}
+        if before:
+            params["before"] = before
+        response = await client.get("/api/v1/callbacks", params=params, headers=headers)
+        response.raise_for_status()
+        payload = response.json()
+        rows = payload.get("items", [])
+        records.extend(
+            row
+            for row in rows
+            if row.get("checkout_request_id") in checkout_ids
+            and row.get("received_at")
+            and datetime.fromisoformat(str(row["received_at"])) >= received_after
+        )
+        if (
+            checkout_ids.issubset({str(row.get("checkout_request_id")) for row in records})
+            and len(records) >= expected_count
+        ):
+            break
+        before = payload.get("next_before")
+        if not before:
+            break
+    return records
+
+
 async def run(args: argparse.Namespace) -> Result:
     if args.requests < 1 or args.concurrency < 1:
         raise SystemExit("--requests and --concurrency must be positive")
@@ -73,6 +123,15 @@ async def run(args: argparse.Namespace) -> Result:
         raise SystemExit("concurrent-stk is restricted to --environment sandbox")
     if args.scenario == "concurrent-stk" and not args.token:
         raise SystemExit("concurrent-stk requires --token")
+    if (
+        args.scenario in {"callback-burst", "duplicate-callback"}
+        and not args.token
+        and not args.skip_correctness_assertions
+    ):
+        raise SystemExit(
+            "callback correctness assertions require --token; "
+            "use --skip-correctness-assertions only for latency diagnostics"
+        )
     if args.scenario != "ready" and args.scenario not in WRITE_SCENARIOS and not args.token:
         raise SystemExit("--token is required for authenticated read scenarios")
 
@@ -93,8 +152,11 @@ async def run(args: argparse.Namespace) -> Result:
     durations: list[float] = []
     statuses: dict[str, int] = {}
     failures = 0
+    checkout_ids: set[str] = set()
+    payment_ids: list[str] = []
     headers = {"Authorization": f"Bearer {args.token}"} if args.token else {}
-    started_at = datetime.now(timezone.utc).isoformat()
+    started_datetime = datetime.now(timezone.utc)
+    started_at = started_datetime.isoformat()
     started = time.perf_counter()
 
     async with httpx.AsyncClient(
@@ -118,6 +180,9 @@ async def run(args: argparse.Namespace) -> Result:
                             if args.scenario == "callback-burst"
                             else callback_payload
                         )
+                        checkout_id = callback_checkout_id(body or {})
+                        if checkout_id:
+                            checkout_ids.add(checkout_id)
                         response = await client.post(
                             f"/api/v1/callbacks/mpesa/{args.merchant_id}",
                             json=body,
@@ -134,6 +199,10 @@ async def run(args: argparse.Namespace) -> Result:
                             json=body,
                             headers=request_headers,
                         )
+                        if response.status_code in {200, 201, 202}:
+                            response_payload = response.json()
+                            if response_payload.get("id"):
+                                payment_ids.append(str(response_payload["id"]))
                     statuses[str(response.status_code)] = (
                         statuses.get(str(response.status_code), 0) + 1
                     )
@@ -146,10 +215,55 @@ async def run(args: argparse.Namespace) -> Result:
                     durations.append(time.perf_counter() - before)
 
         await asyncio.gather(*(one(index) for index in range(args.requests)))
+        assertions: dict[str, bool] = {}
+        if not args.skip_correctness_assertions and args.scenario in {
+            "callback-burst",
+            "duplicate-callback",
+        }:
+            records = await callback_evidence(
+                client,
+                headers=headers,
+                merchant_id=args.merchant_id,
+                checkout_ids=checkout_ids,
+                expected_count=args.requests,
+                received_after=started_datetime,
+            )
+            assertions["all_callback_evidence_preserved"] = len(records) == args.requests
+            if args.scenario == "duplicate-callback":
+                duplicate_count = sum(
+                    row.get("processing_status") == "duplicate"
+                    or bool(row.get("duplicate_of_callback_id"))
+                    for row in records
+                )
+                assertions["duplicate_callbacks_classified"] = duplicate_count >= args.requests - 1
+        elif not args.skip_correctness_assertions and args.scenario == "concurrent-stk":
+            assertions["all_stk_payments_returned"] = len(payment_ids) == args.requests
+            duplicate_transitions = 0
+            for payment_id in payment_ids:
+                response = await client.get(
+                    f"/api/v1/payments/{payment_id}/timeline",
+                    headers=headers,
+                )
+                if response.status_code != 200:
+                    duplicate_transitions += 1
+                    continue
+                signatures: dict[tuple[str, str, str], int] = {}
+                for row in response.json().get("ledger", []):
+                    signature = (
+                        str(row.get("event_type")),
+                        str(row.get("status_from")),
+                        str(row.get("status_to")),
+                    )
+                    signatures[signature] = signatures.get(signature, 0) + 1
+                duplicate_transitions += sum(
+                    count - 1 for count in signatures.values() if count > 1
+                )
+            assertions["no_duplicate_ledger_transitions"] = duplicate_transitions == 0
 
     elapsed = time.perf_counter() - started
     milliseconds = [duration * 1000 for duration in durations]
     p95_ms = percentile(milliseconds, 0.95)
+    threshold_ms = args.max_p95_ms or DEFAULT_P95_THRESHOLDS_MS[args.scenario]
     return Result(
         scenario=args.scenario,
         target=args.base_url,
@@ -165,8 +279,9 @@ async def run(args: argparse.Namespace) -> Result:
         p95_ms=round(p95_ms, 2),
         p99_ms=round(percentile(milliseconds, 0.99), 2),
         max_ms=round(max(milliseconds), 2),
-        threshold_ms=args.max_p95_ms,
-        passed=failures == 0 and p95_ms <= args.max_p95_ms,
+        threshold_ms=threshold_ms,
+        assertions=assertions,
+        passed=(failures == 0 and p95_ms <= threshold_ms and all(assertions.values())),
     )
 
 
@@ -195,6 +310,7 @@ def write_report(result: Result, output_dir: str) -> tuple[Path, Path]:
                     f"max `{result.max_ms} ms`"
                 ),
                 f"- Gate: p95 <= `{result.threshold_ms} ms`",
+                f"- Correctness assertions: `{json.dumps(result.assertions, sort_keys=True)}`",
                 f"- Result: `{'PASS' if result.passed else 'FAIL'}`",
                 "",
             ]
@@ -220,9 +336,10 @@ def main() -> None:
     parser.add_argument("--requests", type=int, default=500)
     parser.add_argument("--concurrency", type=int, default=20)
     parser.add_argument("--timeout-seconds", type=float, default=15)
-    parser.add_argument("--max-p95-ms", type=float, default=1000)
+    parser.add_argument("--max-p95-ms", type=float)
     parser.add_argument("--output-dir", default="artifacts/performance")
     parser.add_argument("--allow-writes", action="store_true")
+    parser.add_argument("--skip-correctness-assertions", action="store_true")
     args = parser.parse_args()
     result = asyncio.run(run(args))
     json_path, markdown_path = write_report(result, args.output_dir)

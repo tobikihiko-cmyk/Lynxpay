@@ -15,11 +15,16 @@ from app.daraja import (
     DarajaSubmissionUncertainError,
     redact_reversal_payload,
 )
-from app.models import DarajaCredential, MerchantAccount, ReversalRequest
+from app.models import DarajaCredential, MerchantAccount, Payment, ReversalRequest
 from app.observability import (
     DARAJA_REQUEST_DURATION,
     MPESA_RESULT_CODES,
     REVERSAL_SUBMISSIONS,
+)
+from app.reversal_controls import (
+    merge_reversal_request_evidence,
+    merge_reversal_response_evidence,
+    reversal_binding_error,
 )
 from app.service import (
     audit,
@@ -90,6 +95,33 @@ async def submit_claimed_reversal(
     reversal = query.first()
     if not reversal or reversal.status != "approved" or reversal.lease_owner != worker_id:
         return None
+    payment_query = db.query(Payment).filter(
+        Payment.id == reversal.payment_id,
+        Payment.organization_id == reversal.organization_id,
+        Payment.merchant_account_id == reversal.merchant_account_id,
+    )
+    if db.bind and db.bind.dialect.name == "postgresql":
+        payment_query = payment_query.with_for_update()
+    payment = payment_query.first()
+    binding_error = reversal_binding_error(reversal, payment)
+    if binding_error:
+        reversal.status = "failed"
+        reversal.response_description = f"Reversal binding validation failed: {binding_error}"
+        reversal.completed_at = utcnow()
+        reversal.lease_owner = None
+        reversal.lease_expires_at = None
+        audit(
+            db,
+            organization_id=reversal.organization_id,
+            merchant_id=reversal.merchant_account_id,
+            action="reversal_submission_binding_conflict",
+            entity_type="reversal_request",
+            entity_id=reversal.id,
+            metadata={"reason": binding_error},
+        )
+        db.commit()
+        REVERSAL_SUBMISSIONS.labels("binding_conflict").inc()
+        return reversal
     merchant = (
         db.query(MerchantAccount).filter(MerchantAccount.id == reversal.merchant_account_id).first()
     )
@@ -131,10 +163,10 @@ async def submit_claimed_reversal(
         "merchant_account_id": reversal.merchant_account_id,
         "environment": merchant.environment,
         "shortcode": merchant.shortcode,
-        "transaction_id": reversal.payment.mpesa_receipt_number,
+        "transaction_id": payment.mpesa_receipt_number,
         "amount": reversal.amount,
         "reason": reversal.reason,
-        "correlation_id": reversal.payment.correlation_id,
+        "correlation_id": payment.correlation_id,
     }
     if not snapshot["transaction_id"]:
         reversal.status = "failed"
@@ -209,10 +241,14 @@ async def submit_claimed_reversal(
         str(response["ResponseCode"]) if response.get("ResponseCode") is not None else None
     )
     reversal.response_description = description
-    reversal.response_payload = response or None
-    reversal.request_payload_redacted = (
-        redact_reversal_payload(sent_payload) if sent_payload else None
-    )
+    if response:
+        merge_reversal_response_evidence(reversal, "submission", response)
+    if sent_payload:
+        merge_reversal_request_evidence(
+            reversal,
+            "provider_request",
+            redact_reversal_payload(sent_payload),
+        )
     reversal.originator_conversation_id = response.get("OriginatorConversationID")
     reversal.conversation_id = response.get("ConversationID")
     reversal.submitted_at = utcnow() if outcome == "submitted" else None
